@@ -1,0 +1,17 @@
+{
+  "name": "My PA",
+  "short_name": "My PA",
+  "description": "Your personal assistant and second brain.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f8fc",
+  "theme_color": "#0ea5e9",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
