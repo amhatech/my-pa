@@ -58,32 +58,73 @@ Deno.serve(async (request) => {
     : [];
   const context = body.context && typeof body.context === 'object' ? body.context : {};
 
-  const apiResponse = await fetch(
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': geminiApiKey,
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{
-            text: `You are Mercy, a warm and practical personal assistant. Use only the user's supplied records as personal facts. Do not claim to save or change records; ask for confirmation or explain that the app does not yet support that action. Keep replies concise.\n\nUser records: ${JSON.stringify(context)}`,
-          }],
+  let apiResponse: Response;
+  try {
+    apiResponse = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent',
+      {
+        method: 'POST',
+        signal: AbortSignal.timeout(25_000),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': geminiApiKey,
         },
-        contents: [
-          ...history.map(({ role, text }) => ({ role, parts: [{ text }] })),
-          { role: 'user', parts: [{ text: body.message }] },
-        ],
-        generationConfig: { maxOutputTokens: 512 },
-      }),
-    },
-  );
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{
+              text: `You are Mercy, a warm, thoughtful, practical woman personal assistant. Speak naturally and kindly. Help the user plan, reason, learn, and organise using only their supplied records. Never invent personal facts, dates, or commitments. If information is missing, say so and ask one useful question. Never claim a task was changed: when the user asks to organise, prioritise, reorder, or create tasks, return a proposed task plan for the user to review and confirm in the app. For ordinary chat, taskProposal must be null. A task plan may reorder only existing schedule records whose type is "Task" and may add up to three new tasks if the user requested tasks be created. Include each existing task ID exactly once, use its exact ID as a string, and do not include or modify schedule records of other types. Do not invent due dates or times. Keep replies concise and include a brief plan summary.\n\nReturn only the requested JSON structure. The user's current saved schedule, goals, and notes follow:\n${JSON.stringify(context)}`,
+            }],
+          },
+          contents: [
+            ...history.map(({ role, text }) => ({ role, parts: [{ text }] })),
+            { role: 'user', parts: [{ text: body.message }] },
+          ],
+          generationConfig: {
+            maxOutputTokens: 900,
+            temperature: 0.6,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: 'OBJECT',
+              properties: {
+                reply: { type: 'STRING' },
+                taskProposal: {
+                  type: 'OBJECT',
+                  nullable: true,
+                  properties: {
+                    summary: { type: 'STRING' },
+                    tasks: {
+                      type: 'ARRAY',
+                      items: {
+                        type: 'OBJECT',
+                        properties: {
+                          existingTaskId: { type: 'STRING', nullable: true },
+                          title: { type: 'STRING' },
+                          priority: { type: 'STRING', enum: ['high', 'medium', 'low'] },
+                        },
+                        required: ['existingTaskId', 'title', 'priority'],
+                      },
+                    },
+                  },
+                  required: ['summary', 'tasks'],
+                },
+              },
+              required: ['reply', 'taskProposal'],
+            },
+          },
+        }),
+      },
+    );
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === 'TimeoutError';
+    console.error(timedOut ? 'Gemini request timed out.' : 'Gemini request could not be completed.');
+    return Response.json(
+      { error: timedOut ? 'The AI service timed out. Please try again.' : 'The AI service could not be reached.' },
+      { status: 503, headers: corsHeaders },
+    );
+  }
 
   if (!apiResponse.ok) {
-    const errorBody = await apiResponse.text();
-    console.error('Gemini request failed:', apiResponse.status, errorBody);
+    console.error('Gemini request failed with status:', apiResponse.status);
     return Response.json(
       { error: 'Mercy could not get a response from the AI service.', status: apiResponse.status },
       { status: apiResponse.status === 429 || apiResponse.status >= 500 ? 503 : 502, headers: corsHeaders },
@@ -91,13 +132,28 @@ Deno.serve(async (request) => {
   }
 
   const result = await apiResponse.json();
-  const reply = result.candidates?.[0]?.content?.parts
+  const responseText = result.candidates?.[0]?.content?.parts
     ?.map((part: { text?: string }) => part.text ?? '')
     .join('')
     .trim();
-  if (!reply) {
+  if (!responseText) {
     return Response.json({ error: 'The AI service returned an empty reply.' }, { status: 502, headers: corsHeaders });
   }
 
-  return Response.json({ reply }, { headers: corsHeaders });
+  let structuredReply: { reply?: unknown; taskProposal?: unknown };
+  try {
+    structuredReply = JSON.parse(responseText);
+  } catch {
+    console.error('Gemini returned a response that was not valid JSON.');
+    return Response.json({ error: 'The AI service returned an invalid response.' }, { status: 502, headers: corsHeaders });
+  }
+
+  if (typeof structuredReply.reply !== 'string' || !structuredReply.reply.trim()) {
+    return Response.json({ error: 'The AI service returned an invalid reply.' }, { status: 502, headers: corsHeaders });
+  }
+
+  return Response.json({
+    reply: structuredReply.reply.trim(),
+    taskProposal: structuredReply.taskProposal ?? null,
+  }, { headers: corsHeaders });
 });

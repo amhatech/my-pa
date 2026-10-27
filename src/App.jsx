@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Home, 
   MessageSquare, 
@@ -24,11 +24,29 @@ import {
 } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from './lib/supabase.js';
 
+function getTimeGreeting(date = new Date()) {
+  const hour = date.getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
 function useLocalStorageState(key, initialValue) {
   const [value, setValue] = useState(() => {
     try {
       const storedValue = window.localStorage.getItem(key);
-      return storedValue ? JSON.parse(storedValue) : initialValue;
+      if (!storedValue) return initialValue;
+
+      const parsedValue = JSON.parse(storedValue);
+      if (key === 'my-pa-messages' && Array.isArray(parsedValue)) {
+        return parsedValue.map(message => (
+          message.sender === 'mercy' &&
+          message.text === "Good morning! I'm Mercy, your personal PA. How can I help you organize your day or manage your goals today?"
+            ? { ...message, text: "Hello! I'm Mercy, your personal assistant. How can I help you today?" }
+            : message
+        ));
+      }
+      return parsedValue;
     } catch (error) {
       console.error(`Could not load ${key} from local storage:`, error);
       return initialValue;
@@ -48,37 +66,69 @@ function useLocalStorageState(key, initialValue) {
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState('home');
+  const [timeGreeting, setTimeGreeting] = useState(getTimeGreeting);
   const [authUser, setAuthUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState('sign-in');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [signupUsername, setSignupUsername] = useState('');
   const [profileUsername, setProfileUsername] = useState('');
   const [usernameInput, setUsernameInput] = useState('');
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileNeedsUsername, setProfileNeedsUsername] = useState(false);
   const [profileError, setProfileError] = useState('');
+  const [profileNotice, setProfileNotice] = useState('');
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceReady, setWorkspaceReady] = useState(false);
-  const [workspaceNeedsSetup, setWorkspaceNeedsSetup] = useState(false);
   const [syncError, setSyncError] = useState('');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [soundEnabled, setSoundEnabled] = useLocalStorageState('my-pa-notification-sound', true);
   const [notificationPermission, setNotificationPermission] = useState(
     'Notification' in window ? Notification.permission : 'unsupported'
   );
+  const [notificationError, setNotificationError] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState('');
   
   // Chat state
   const [messages, setMessages] = useLocalStorageState('my-pa-messages', [
-    { sender: 'mercy', text: "Good morning! I'm Mercy, your personal PA. How can I help you organize your day or manage your goals today?" }
+    { sender: 'mercy', text: "Hello! I'm Mercy, your personal assistant. How can I help you today?" }
   ]);
   const [inputText, setInputText] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const chatMessagesRef = useRef(null);
   const recognitionRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const dailyNoticeProcessingRef = useRef(new Set());
+
+  const playNotificationChime = useCallback(() => {
+    const audioContext = audioContextRef.current;
+    if (
+      !soundEnabled ||
+      document.visibilityState !== 'visible' ||
+      !audioContext ||
+      audioContext.state !== 'running'
+    ) return;
+
+    const startAt = audioContext.currentTime;
+    [659.25, 880].forEach((frequency, index) => {
+      const oscillator = audioContext.createOscillator();
+      const volume = audioContext.createGain();
+      const noteStart = startAt + index * 0.18;
+      oscillator.type = 'sine';
+      oscillator.frequency.value = frequency;
+      volume.gain.setValueAtTime(0.0001, noteStart);
+      volume.gain.exponentialRampToValueAtTime(0.12, noteStart + 0.025);
+      volume.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.32);
+      oscillator.connect(volume);
+      volume.connect(audioContext.destination);
+      oscillator.start(noteStart);
+      oscillator.stop(noteStart + 0.34);
+    });
+  }, [soundEnabled]);
 
   // Schedule / Time Management State
   const [scheduleItems, setScheduleItems] = useLocalStorageState('my-pa-schedule', [
@@ -118,6 +168,12 @@ export default function App() {
   const phoneFrameRef = useRef(null);
   const mercyButtonRef = useRef(null);
   const dragMovedRef = useRef(false);
+  const dragStartRef = useRef(null);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setTimeGreeting(getTimeGreeting()), 60_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -142,8 +198,8 @@ export default function App() {
       setProfileUsername('');
       setProfileNeedsUsername(false);
       setProfileError('');
+      setProfileNotice('');
       setWorkspaceReady(false);
-      setWorkspaceNeedsSetup(false);
     });
 
     return () => {
@@ -161,20 +217,46 @@ export default function App() {
     let active = true;
     setProfileLoading(true);
     setProfileError('');
-    supabase.from('profiles').select('username').eq('user_id', authUser.id).maybeSingle()
-      .then(({ data, error }) => {
-        if (!active) return;
-        if (error) {
-          setProfileError(`Could not load your profile: ${error.message}`);
-          return;
+    const loadProfile = async () => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('user_id', authUser.id)
+        .maybeSingle();
+      if (!active) return;
+      if (error) {
+        setProfileError(`Could not load your profile: ${error.message}`);
+        return;
+      }
+      if (data?.username) {
+        setProfileUsername(data.username);
+        setProfileNeedsUsername(false);
+      } else {
+        const requestedUsername = authUser.user_metadata?.username;
+        if (requestedUsername) {
+          const { error: saveError } = await supabase.from('profiles').insert({
+            user_id: authUser.id,
+            username: requestedUsername,
+          });
+          if (!active) return;
+          if (!saveError) {
+            setProfileUsername(requestedUsername);
+            setProfileNeedsUsername(false);
+            return;
+          }
+          if (saveError.code === '23505') {
+            setUsernameInput(requestedUsername);
+            setProfileNotice('That username is already taken. Please choose another.');
+          } else {
+            setProfileError(`Could not save your username: ${saveError.message}`);
+            return;
+          }
         }
-        if (data?.username) {
-          setProfileUsername(data.username);
-          setProfileNeedsUsername(false);
-        } else {
-          setProfileNeedsUsername(true);
-        }
-      })
+        setProfileNeedsUsername(true);
+      }
+    };
+
+    loadProfile()
       .catch(error => {
         if (active) setProfileError(`Could not load your profile: ${error.message}`);
       })
@@ -210,15 +292,95 @@ export default function App() {
           window.localStorage.setItem(storageKey, 'true');
           new Notification(`Upcoming: ${item.title}`, {
             body: `Your event starts at ${item.time}.`,
-            icon: '/pwa-icon.svg',
+            icon: '/pwa-icon-192.png',
             tag: storageKey,
           });
+          playNotificationChime();
         }
       });
       lastCheckedAt = now;
     }, 15_000);
     return () => window.clearInterval(intervalId);
-  }, [scheduleItems, notificationPermission, authUser]);
+  }, [scheduleItems, notificationPermission, authUser, playNotificationChime]);
+
+  useEffect(() => {
+    if (!authUser || !workspaceReady) return undefined;
+
+    let active = true;
+    const deliverDailyNotice = async () => {
+      const now = new Date();
+      if (now.getHours() < 10) return;
+
+      const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const storageKey = `my-pa-daily-notice-${authUser.id}-${dateKey}`;
+      if (window.localStorage.getItem(storageKey) || dailyNoticeProcessingRef.current.has(storageKey)) return;
+      dailyNoticeProcessingRef.current.add(storageKey);
+
+      const todaysEvents = scheduleItems.filter(item =>
+        !item.completed && item.startsAt && new Date(item.startsAt).toDateString() === now.toDateString()
+      );
+      const upcomingGoals = goals.slice(0, 3).map(goal => goal.title);
+      const fallbackNotice = [
+        `Good morning! Here is your Daily Notice for ${now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}.`,
+        todaysEvents.length
+          ? `Today's schedule: ${todaysEvents.map(item => `${item.title} at ${item.time}`).join(', ')}.`
+          : 'You have no events saved for today yet.',
+        upcomingGoals.length ? `Keep one goal moving forward: ${upcomingGoals[0]}.` : 'Choose one important thing to make progress on today.',
+      ].join('\n\n');
+
+      let notice = fallbackNotice;
+      try {
+        if (supabase) {
+          const { data, error } = await supabase.functions.invoke('mercy-chat', {
+            body: {
+              message: `Write my concise, encouraging 10 AM Daily Notice for ${now.toLocaleDateString()} using only the supplied saved records. Mention today's scheduled events and one practical priority. If there are no events or goals, suggest adding one. Do not invent personal details.`,
+              history: [],
+              context: { scheduleItems, goals, memories },
+            },
+          });
+          if (error) throw error;
+          if (typeof data?.reply === 'string' && data.reply.trim()) notice = data.reply.trim();
+        }
+      } catch (error) {
+        console.error('Could not generate Mercy’s daily notice; using the saved-record fallback.', error);
+      }
+
+      if (!active) {
+        dailyNoticeProcessingRef.current.delete(storageKey);
+        return;
+      }
+
+      const message = `Mercy's Daily Notice\n\n${notice}`;
+      setMessages(previous => [...previous, { sender: 'mercy', text: message }]);
+      window.localStorage.setItem(storageKey, 'true');
+      if (notificationPermission === 'granted') {
+        try {
+          new Notification("Mercy's Daily Notice", {
+            body: notice.replace(/\s+/g, ' ').slice(0, 180),
+            icon: '/pwa-icon-192.png',
+            tag: storageKey,
+          });
+        } catch (error) {
+          console.error('Could not show Mercy’s daily notification:', error);
+        }
+      }
+      playNotificationChime();
+      dailyNoticeProcessingRef.current.delete(storageKey);
+    };
+
+    const intervalId = window.setInterval(deliverDailyNotice, 15_000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') deliverDailyNotice();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    deliverDailyNotice();
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [authUser, workspaceReady, scheduleItems, goals, memories, notificationPermission, playNotificationChime, setMessages]);
 
   useEffect(() => {
     if (!authUser || !supabase || profileLoading || profileNeedsUsername || profileError || !profileUsername) return undefined;
@@ -227,7 +389,7 @@ export default function App() {
     setWorkspaceLoading(true);
     setWorkspaceReady(false);
     supabase.from('user_workspace').select('data').eq('user_id', authUser.id).maybeSingle()
-      .then(({ data, error }) => {
+      .then(async ({ data, error }) => {
         if (!active) return;
         if (error) {
           if (!navigator.onLine) {
@@ -236,11 +398,26 @@ export default function App() {
             return;
           }
           setSyncError(`Could not load cloud data: ${error.message}`);
-          setWorkspaceNeedsSetup(true);
           return;
         }
         if (!data) {
-          setWorkspaceNeedsSetup(true);
+          const emptyWorkspace = { messages: [], scheduleItems: [], goals: [], memories: [] };
+          const { error: createError } = await supabase.from('user_workspace').insert({
+            user_id: authUser.id,
+            data: emptyWorkspace,
+            updated_at: new Date().toISOString(),
+          });
+          if (!active) return;
+          if (createError) {
+            setSyncError(`Could not create your workspace: ${createError.message}`);
+            return;
+          }
+          setMessages([]);
+          setScheduleItems([]);
+          setGoals([]);
+          setMemories([]);
+          setWorkspaceReady(true);
+          setSyncError('');
           return;
         }
 
@@ -265,7 +442,7 @@ export default function App() {
   }, [authUser, profileLoading, profileNeedsUsername, profileError, profileUsername, setMessages, setScheduleItems, setGoals, setMemories]);
 
   useEffect(() => {
-    if (!authUser || !workspaceReady || workspaceNeedsSetup || !supabase || !isOnline) return undefined;
+    if (!authUser || !workspaceReady || !supabase || !isOnline) return undefined;
 
     const timeoutId = window.setTimeout(async () => {
       const { error } = await supabase.from('user_workspace').upsert({
@@ -295,37 +472,79 @@ export default function App() {
     window.speechSynthesis?.cancel();
   }, []);
 
-  const handleMouseDown = () => {
+  const handlePointerDown = (event) => {
+    if (!event.isPrimary || event.button !== 0) return;
     const frame = phoneFrameRef.current;
-    const button = mercyButtonRef.current;
+    const button = event.currentTarget;
     dragMovedRef.current = false;
     if (frame && button) {
       const frameBounds = frame.getBoundingClientRect();
       const buttonBounds = button.getBoundingClientRect();
-      setPosition({ x: buttonBounds.left - frameBounds.left, y: buttonBounds.top - frameBounds.top });
+      const x = buttonBounds.left - frameBounds.left;
+      const y = buttonBounds.top - frameBounds.top;
+      setPosition({ x, y });
+      dragStartRef.current = { pointerX: event.clientX, pointerY: event.clientY, x, y };
+      button.setPointerCapture(event.pointerId);
+      setIsDragging(true);
     }
-    setIsDragging(true);
   };
-  const handleMouseMove = (e) => {
+  const handlePointerMove = (event) => {
     if (!isDragging) return;
     const frame = phoneFrameRef.current;
     const button = mercyButtonRef.current;
-    if (!frame || !button) return;
+    const start = dragStartRef.current;
+    if (!frame || !button || !start) return;
 
-    const bounds = frame.getBoundingClientRect();
-    const newX = Math.max(12, Math.min(frame.clientWidth - button.offsetWidth - 12, e.clientX - bounds.left - button.offsetWidth / 2));
-    const newY = Math.max(12, Math.min(frame.clientHeight - button.offsetHeight - 12, e.clientY - bounds.top - button.offsetHeight / 2));
+    if (!dragMovedRef.current && Math.hypot(event.clientX - start.pointerX, event.clientY - start.pointerY) < 6) return;
+
+    const newX = Math.max(12, Math.min(frame.clientWidth - button.offsetWidth - 12, start.x + event.clientX - start.pointerX));
+    const newY = Math.max(12, Math.min(frame.clientHeight - button.offsetHeight - 12, start.y + event.clientY - start.pointerY));
     dragMovedRef.current = true;
     setPosition({ x: newX, y: newY });
   };
-  const handleMouseUp = () => setIsDragging(false);
+  const handlePointerUp = () => {
+    setIsDragging(false);
+    dragStartRef.current = null;
+  };
 
   const enableNotifications = async () => {
+    try {
+      if ('AudioContext' in window) {
+        audioContextRef.current ??= new window.AudioContext();
+        await audioContextRef.current.resume();
+      }
+    } catch (error) {
+      console.error('Could not enable notification sound:', error);
+      setNotificationError('Sound could not be enabled in this browser.');
+    }
+
     if (!('Notification' in window)) {
       setNotificationPermission('unsupported');
       return;
     }
-    setNotificationPermission(await Notification.requestPermission());
+    try {
+      setNotificationPermission(await Notification.requestPermission());
+      setNotificationError('');
+    } catch (error) {
+      console.error('Could not request notification permission:', error);
+      setNotificationError('Could not enable notifications. Check your browser settings.');
+    }
+  };
+
+  const testNotificationSound = async () => {
+    try {
+      if (!('AudioContext' in window)) {
+        setNotificationError('Sound is not supported in this browser.');
+        return;
+      }
+      audioContextRef.current ??= new window.AudioContext();
+      await audioContextRef.current.resume();
+      playNotificationChime();
+      setNotificationError('');
+    } catch (error) {
+      console.error('Could not play notification sound:', error);
+      setNotificationError('Could not play the sound. Check your device volume and browser settings.');
+    }
   };
 
   const startVoiceInput = () => {
@@ -359,7 +578,18 @@ export default function App() {
       return;
     }
     window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const language = navigator.language.toLowerCase();
+    const feminineVoice = voices.find(voice =>
+      voice.lang.toLowerCase().startsWith(language.split('-')[0]) &&
+      /female|woman|samantha|victoria|karen|moira|tessa|serena|ava|aria|jenny|zira|susan/i.test(voice.name)
+    ) || voices.find(voice =>
+      /female|woman|samantha|victoria|karen|moira|tessa|serena|ava|aria|jenny|zira|susan/i.test(voice.name)
+    );
+    if (feminineVoice) utterance.voice = feminineVoice;
+    else utterance.lang = navigator.language;
+    window.speechSynthesis.speak(utterance);
   };
 
   const handleAuthSubmit = async (event) => {
@@ -368,8 +598,18 @@ export default function App() {
     setAuthNotice('');
     if (!supabase) return;
 
+    const username = signupUsername.trim().toLowerCase();
+    if (authMode === 'sign-up' && !/^[a-z0-9_]{3,20}$/.test(username)) {
+      setAuthError('Choose a username using 3–20 letters, numbers, or underscores.');
+      return;
+    }
+
     const result = authMode === 'sign-up'
-      ? await supabase.auth.signUp({ email: authEmail, password: authPassword })
+      ? await supabase.auth.signUp({
+        email: authEmail,
+        password: authPassword,
+        options: { data: { username } },
+      })
       : await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
 
     if (result.error) {
@@ -377,7 +617,7 @@ export default function App() {
       return;
     }
     if (authMode === 'sign-up' && !result.data.session) {
-      setAuthNotice('Check your email to confirm your account, then sign in.');
+      setAuthNotice('Check your email to confirm your account, then sign in. Your chosen username will be saved after confirmation.');
     }
     setAuthPassword('');
   };
@@ -404,6 +644,7 @@ export default function App() {
     if (!supabase || !authUser) return;
 
     setProfileError('');
+    setProfileNotice('');
     const { error } = await supabase.from('profiles').upsert(
       { user_id: authUser.id, username },
       { onConflict: 'user_id' },
@@ -417,53 +658,6 @@ export default function App() {
 
     setProfileUsername(username);
     setProfileNeedsUsername(false);
-  };
-
-  const importLocalWorkspace = async () => {
-    if (!supabase || !authUser) return;
-    setSyncError('');
-    const localWorkspace = {
-      messages: JSON.parse(window.localStorage.getItem('my-pa-messages') || '[]'),
-      scheduleItems: JSON.parse(window.localStorage.getItem('my-pa-schedule') || '[]'),
-      goals: JSON.parse(window.localStorage.getItem('my-pa-goals') || '[]'),
-      memories: JSON.parse(window.localStorage.getItem('my-pa-memories') || '[]'),
-    };
-    const { error } = await supabase.from('user_workspace').upsert({
-      user_id: authUser.id,
-      data: localWorkspace,
-      updated_at: new Date().toISOString(),
-    });
-    if (error) {
-      setSyncError(`Could not import this browser's data: ${error.message}`);
-      return;
-    }
-
-    setMessages(localWorkspace.messages);
-    setScheduleItems(localWorkspace.scheduleItems);
-    setGoals(localWorkspace.goals);
-    setMemories(localWorkspace.memories);
-    setWorkspaceNeedsSetup(false);
-    setWorkspaceReady(true);
-  };
-
-  const startWithEmptyWorkspace = async () => {
-    if (!supabase || !authUser) return;
-    const emptyWorkspace = { messages: [], scheduleItems: [], goals: [], memories: [] };
-    const { error } = await supabase.from('user_workspace').upsert({
-      user_id: authUser.id,
-      data: emptyWorkspace,
-      updated_at: new Date().toISOString(),
-    });
-    if (error) {
-      setSyncError(`Could not create cloud workspace: ${error.message}`);
-      return;
-    }
-    setMessages([]);
-    setScheduleItems([]);
-    setGoals([]);
-    setMemories([]);
-    setWorkspaceNeedsSetup(false);
-    setWorkspaceReady(true);
   };
 
   const handleSignOut = async () => {
@@ -493,7 +687,12 @@ export default function App() {
 
   const clearCloudWorkspace = async () => {
     if (!supabase || !authUser || !window.confirm('Permanently delete your saved My PA records from the cloud? Download a backup first if you need one.')) return;
-    const { error } = await supabase.from('user_workspace').delete().eq('user_id', authUser.id);
+    const emptyWorkspace = { messages: [], scheduleItems: [], goals: [], memories: [] };
+    const { error } = await supabase.from('user_workspace').upsert({
+      user_id: authUser.id,
+      data: emptyWorkspace,
+      updated_at: new Date().toISOString(),
+    });
     if (error) {
       setSyncError(`Could not delete cloud data: ${error.message}`);
       return;
@@ -502,8 +701,8 @@ export default function App() {
     setScheduleItems([]);
     setGoals([]);
     setMemories([]);
-    setWorkspaceNeedsSetup(true);
-    setWorkspaceReady(false);
+    setWorkspaceReady(true);
+    setSyncError('');
   };
 
   const deleteAccount = async () => {
@@ -541,18 +740,109 @@ export default function App() {
       });
       if (error) throw error;
 
-      const mercyReply = data?.reply || "I couldn't get a reply just now. Please try again.";
-      setMessages(prev => [...prev, { sender: 'mercy', text: mercyReply }]);
+      const taskIds = new Set(
+        scheduleItems.filter(item => item.type === 'Task').map(item => String(item.id))
+      );
+      const rawProposal = data?.taskProposal;
+      let taskProposal = null;
+      if (rawProposal && Array.isArray(rawProposal.tasks)) {
+        const proposedTasks = [];
+        const seenExistingIds = new Set();
+        let newTaskCount = 0;
+        for (const task of rawProposal.tasks.slice(0, taskIds.size + 3)) {
+          if (typeof task?.title !== 'string' || !task.title.trim() || task.title.trim().length > 120) continue;
+          if (!['high', 'medium', 'low'].includes(task.priority)) continue;
+          const existingTaskId = task.existingTaskId === null ? null : String(task.existingTaskId);
+          if (existingTaskId === null) {
+            if (newTaskCount >= 3) continue;
+            newTaskCount += 1;
+          } else if (!taskIds.has(existingTaskId) || seenExistingIds.has(existingTaskId)) {
+            continue;
+          } else {
+            seenExistingIds.add(existingTaskId);
+          }
+          proposedTasks.push({
+            existingTaskId,
+            title: task.title.trim(),
+            priority: task.priority,
+          });
+        }
+        if (proposedTasks.length) {
+          taskProposal = {
+            summary: typeof rawProposal.summary === 'string' ? rawProposal.summary.slice(0, 300) : 'Review Mercy’s suggested task order.',
+            tasks: proposedTasks,
+            status: 'pending',
+          };
+        }
+      }
+
+      const mercyReply = typeof data?.reply === 'string' && data.reply.trim()
+        ? data.reply.trim()
+        : "I couldn't get a reply just now. Please try again.";
+      setMessages(prev => [...prev, { sender: 'mercy', text: mercyReply, ...(taskProposal ? { taskProposal } : {}) }]);
     } catch (error) {
       console.error('Error connecting to Mercy AI:', error);
-      const errorStatus = error instanceof Error && 'status' in error ? error.status : undefined;
-      const errorMessage = errorStatus === 503 || errorStatus === 504
-        ? "Mercy's AI is taking longer than expected. Please try again shortly."
-        : "Mercy couldn't connect to the AI service. Please check your internet connection and try again.";
+      const errorStatus = error?.context?.status ?? error?.status;
+      const errorMessage = errorStatus === 401
+        ? 'Your session may have expired. Please sign in again, then try once more.'
+        : "I'm sorry, I'm having trouble responding right now. Your message is still here—please try again in a little while.";
       setMessages(prev => [...prev, { sender: 'mercy', text: errorMessage }]);
     } finally {
       setIsThinking(false);
     }
+  };
+
+  const updateTaskProposal = (messageIndex, update) => {
+    setMessages(previous => previous.map((message, index) => (
+      index === messageIndex && message.taskProposal?.status === 'pending'
+        ? { ...message, taskProposal: update(message.taskProposal) }
+        : message
+    )));
+  };
+
+  const applyTaskProposal = (messageIndex) => {
+    const proposal = messages[messageIndex]?.taskProposal;
+    if (!proposal || proposal.status !== 'pending') return;
+
+    setScheduleItems(previous => {
+      const currentTasks = previous.filter(item => item.type === 'Task');
+      const tasksById = new Map(currentTasks.map(item => [String(item.id), item]));
+      const usedIds = new Set();
+      const reorderedTasks = [];
+
+      proposal.tasks.forEach((task, index) => {
+        if (task.existingTaskId !== null) {
+          const existingTask = tasksById.get(task.existingTaskId);
+          if (existingTask && !usedIds.has(task.existingTaskId)) {
+            reorderedTasks.push({ ...existingTask, title: task.title });
+            usedIds.add(task.existingTaskId);
+          }
+          return;
+        }
+        reorderedTasks.push({
+          id: Date.now() + index,
+          title: task.title,
+          time: 'Not scheduled',
+          type: 'Task',
+          completed: false,
+        });
+      });
+
+      currentTasks.forEach(task => {
+        if (!usedIds.has(String(task.id))) reorderedTasks.push(task);
+      });
+
+      let taskIndex = 0;
+      const updatedSchedule = previous.map(item => (
+        item.type === 'Task' ? reorderedTasks[taskIndex++] : item
+      ));
+      return [...updatedSchedule, ...reorderedTasks.slice(taskIndex)];
+    });
+    updateTaskProposal(messageIndex, current => ({ ...current, status: 'applied' }));
+  };
+
+  const dismissTaskProposal = (messageIndex) => {
+    updateTaskProposal(messageIndex, current => ({ ...current, status: 'dismissed' }));
   };
 
   // Add schedule item
@@ -650,14 +940,12 @@ export default function App() {
     );
   }
 
-  if (!isSupabaseConfigured || !authUser || workspaceNeedsSetup || profileNeedsUsername || profileError) {
+  if (!isSupabaseConfigured || !authUser || profileNeedsUsername || profileError) {
     return (
       <main className="min-h-screen flex items-center justify-center bg-[#f4f8fc] p-6">
         <section className="w-full max-w-md rounded-3xl border border-sky-100 bg-white p-6 shadow-xl">
           <div className="mb-5 flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-sky-500 text-white">
-              <Sparkles size={24} />
-            </div>
+            <img src="/my-pa-logo.png" alt="My PA" className="h-16 w-16 rounded-2xl object-cover" />
             <div>
               <h1 className="text-xl font-bold text-slate-900">My PA</h1>
               <p className="text-sm text-slate-500">Your personal assistant and second brain</p>
@@ -696,26 +984,13 @@ export default function App() {
                 placeholder="e.g. alex_2026"
                 className="w-full rounded-xl border border-sky-200 px-4 py-3 text-sm"
               />
+              {profileNotice && <p role="status" className="text-sm text-amber-700">{profileNotice}</p>}
               {profileError && <p role="alert" className="text-sm text-red-600">{profileError}</p>}
               <button type="submit" className="w-full rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white">
                 Save username
               </button>
               <button type="button" onClick={handleSignOut} className="w-full py-2 text-sm text-slate-500">Sign out</button>
             </form>
-          ) : authUser && workspaceNeedsSetup ? (
-            <div className="space-y-4">
-              <h2 className="font-semibold text-slate-900">Choose your first cloud workspace</h2>
-              <p className="text-sm text-slate-600">
-                Import the records from this browser into your private account, or start with an empty workspace.
-              </p>
-              <button onClick={importLocalWorkspace} className="w-full rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white">
-                Import this browser’s data
-              </button>
-              <button onClick={startWithEmptyWorkspace} className="w-full rounded-xl border border-sky-200 px-4 py-3 text-sm font-semibold text-sky-800">
-                Start with an empty workspace
-              </button>
-              <button onClick={handleSignOut} className="w-full py-2 text-sm text-slate-500">Sign out</button>
-            </div>
           ) : (
             <>
               <div className="space-y-3">
@@ -736,6 +1011,20 @@ export default function App() {
               <h2 className="font-semibold text-slate-900">
                 {authMode === 'sign-in' ? 'Sign in to your account' : 'Create your account'}
               </h2>
+              {authMode === 'sign-up' && (
+                <input
+                  type="text"
+                  autoComplete="username"
+                  minLength={3}
+                  maxLength={20}
+                  pattern="[a-zA-Z0-9_]{3,20}"
+                  required
+                  value={signupUsername}
+                  onChange={event => setSignupUsername(event.target.value)}
+                  placeholder="Username (3–20 letters, numbers, or underscores)"
+                  className="w-full rounded-xl border border-sky-200 px-4 py-3 text-sm"
+                />
+              )}
               <input
                 type="email"
                 autoComplete="email"
@@ -790,10 +1079,8 @@ export default function App() {
   }
 
   return (
-    <div 
+    <div
       className="min-h-screen bg-[#f4f8fc] flex justify-center items-center p-0 md:p-6 select-none overflow-hidden"
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
     >
       {/* Phone Frame Container */}
       <div ref={phoneFrameRef} className="w-full md:max-w-[430px] h-screen md:h-[880px] bg-white md:rounded-[40px] shadow-2xl flex flex-col justify-between relative overflow-hidden border border-sky-100">
@@ -801,17 +1088,16 @@ export default function App() {
         {/* TOP HEADER */}
         <div className="pt-12 px-6 pb-4 bg-gradient-to-b from-sky-50 to-white flex justify-between items-center border-b border-sky-100/60 shrink-0">
           <div>
-            <span className="text-xs font-semibold uppercase tracking-wider text-sky-600 bg-sky-100 px-2.5 py-1 rounded-full">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-sky-600 bg-sky-100 px-2 py-1 rounded-full">
+              <img src="/pwa-icon-192.png" alt="" className="h-5 w-5 rounded-md" />
               My PA Assistant
             </span>
-            <h1 className="text-2xl font-bold text-slate-900 mt-1">Good morning ☀️</h1>
+            <h1 className="text-2xl font-bold text-slate-900 mt-1">{timeGreeting}</h1>
             <p className={`mt-1 text-[10px] ${isOnline && !syncError ? 'text-emerald-700' : 'text-amber-700'}`}>
               {!isOnline ? 'Offline — changes will sync when you reconnect' : syncError || 'Private cloud workspace'}
             </p>
           </div>
-          <div className="w-10 h-10 rounded-full bg-sky-500 text-white font-bold flex items-center justify-center shadow-md shadow-sky-200">
-            M
-          </div>
+          <img src="/my-pa-logo.png" alt="My PA" className="h-10 w-10 rounded-full bg-white object-cover shadow-md shadow-sky-200" />
         </div>
 
         {/* MAIN CONTENT AREA */}
@@ -827,7 +1113,7 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-2 mb-2">
                   <Sparkles size={18} className="text-sky-200 animate-pulse" />
-                  <span className="text-xs font-semibold uppercase tracking-wider text-sky-100">Mercy's Daily Note</span>
+                  <span className="text-xs font-semibold uppercase tracking-wider text-sky-100">A little encouragement</span>
                 </div>
                 <p className="text-sm font-medium leading-relaxed text-sky-50">
                   "Don't let the whole day pass without making progress on something that matters. Work quietly, stay consistent."
@@ -880,14 +1166,14 @@ export default function App() {
           {currentTab === 'ai' && (
             <div className="flex flex-col h-full space-y-3">
               <div className="bg-sky-50 p-2.5 rounded-2xl border border-sky-100 text-center shrink-0">
-                <p className="text-xs font-medium text-sky-800">✨ Powered by Gemini — Talk to Mercy</p>
+                <p className="text-xs font-medium text-sky-800">Talk to Mercy about your day, goals, and saved notes.</p>
               </div>
               
               <div ref={chatMessagesRef} className="flex-1 space-y-3 overflow-y-auto pr-1">
                 {messages.map((msg, index) => (
                   <div key={index} className={`flex gap-2 ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
                     {msg.sender === 'mercy' && (
-                      <div className="w-7 h-7 rounded-full bg-sky-500 text-white font-bold flex items-center justify-center text-[11px] shrink-0 mt-1">M</div>
+                      <img src="/my-pa-logo.png" alt="Mercy" className="w-8 h-8 rounded-full bg-white object-cover shrink-0 mt-1" />
                     )}
                     <div className={`p-3 rounded-2xl text-xs max-w-[80%] leading-relaxed ${
                       msg.sender === 'user' 
@@ -895,6 +1181,56 @@ export default function App() {
                         : 'bg-sky-100/70 text-slate-800 rounded-tl-none'
                     }`}>
                       {msg.text}
+                      {msg.sender === 'mercy' && msg.taskProposal?.status === 'pending' && (
+                        <div className="mt-3 space-y-2 border-t border-sky-200 pt-3">
+                          <p className="text-[11px] font-semibold text-slate-700">{msg.taskProposal.summary}</p>
+                          {msg.taskProposal.tasks.map((task, taskIndex) => (
+                            <div key={`${task.existingTaskId ?? 'new'}-${taskIndex}`} className="flex items-center gap-2">
+                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+                                task.priority === 'high' ? 'bg-rose-100 text-rose-700' :
+                                  task.priority === 'medium' ? 'bg-amber-100 text-amber-700' :
+                                    'bg-slate-100 text-slate-600'
+                              }`}>{task.priority}</span>
+                              <input
+                                aria-label={`Edit proposed task ${taskIndex + 1}`}
+                                value={task.title}
+                                maxLength={120}
+                                onChange={event => updateTaskProposal(index, proposal => ({
+                                  ...proposal,
+                                  tasks: proposal.tasks.map((entry, entryIndex) => (
+                                    entryIndex === taskIndex ? { ...entry, title: event.target.value } : entry
+                                  )),
+                                }))}
+                                className="min-w-0 flex-1 rounded-lg border border-sky-200 bg-white px-2 py-1.5 text-[11px] text-slate-800"
+                              />
+                              {task.existingTaskId === null && <span className="shrink-0 text-[9px] text-sky-700">New</span>}
+                            </div>
+                          ))}
+                          <div className="flex gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => applyTaskProposal(index)}
+                              disabled={msg.taskProposal.tasks.some(task => !task.title.trim())}
+                              className="flex-1 rounded-lg bg-sky-600 px-2 py-2 text-[11px] font-semibold text-white disabled:opacity-50"
+                            >
+                              Apply plan
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => dismissTaskProposal(index)}
+                              className="rounded-lg border border-slate-300 px-3 py-2 text-[11px] font-semibold text-slate-700"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {msg.sender === 'mercy' && msg.taskProposal?.status === 'applied' && (
+                        <p className="mt-2 border-t border-sky-200 pt-2 text-[10px] font-medium text-emerald-700">Plan applied to your tasks.</p>
+                      )}
+                      {msg.sender === 'mercy' && msg.taskProposal?.status === 'dismissed' && (
+                        <p className="mt-2 border-t border-sky-200 pt-2 text-[10px] text-slate-500">Plan cancelled; your tasks were not changed.</p>
+                      )}
                       {msg.sender === 'mercy' && (
                         <button type="button" onClick={() => speakMessage(msg.text)} aria-label="Speak Mercy's reply" className="ml-2 inline-flex text-sky-700 align-middle">
                           <Volume2 size={13} />
@@ -906,7 +1242,7 @@ export default function App() {
                 
                 {isThinking && (
                   <div className="flex gap-2 items-center text-sky-600 text-xs italic">
-                    <div className="w-7 h-7 rounded-full bg-sky-500 text-white font-bold flex items-center justify-center text-[11px]">M</div>
+                    <img src="/my-pa-logo.png" alt="Mercy" className="w-8 h-8 rounded-full bg-white object-cover" />
                     <div className="bg-sky-50 p-3 rounded-2xl flex items-center gap-2">
                       <Loader2 className="animate-spin" size={14} />
                       Mercy is thinking...
@@ -1155,8 +1491,8 @@ export default function App() {
           {currentTab === 'settings' && (
             <div className="space-y-4">
               <div className="bg-sky-50 p-3 rounded-2xl border border-sky-100">
-                <h3 className="text-sm font-bold text-sky-900">App Preferences</h3>
-                <p className="text-xs text-sky-700 mt-0.5">Manage your profile and Mercy's behavior.</p>
+                <h3 className="text-sm font-bold text-sky-900">Your account</h3>
+                <p className="text-xs text-sky-700 mt-0.5">Manage your account, reminders, and saved data.</p>
               </div>
 
               <div className="bg-white p-4 rounded-2xl border border-sky-100 shadow-sm space-y-3">
@@ -1164,27 +1500,37 @@ export default function App() {
                   <span className="text-xs font-medium text-slate-800">Username</span>
                   <span className="text-xs font-bold text-sky-600">@{profileUsername}</span>
                 </div>
-                <div className="flex justify-between items-center py-2 border-b border-slate-100">
-                  <span className="text-xs font-medium text-slate-800">Assistant Name</span>
-                  <span className="text-xs font-bold text-sky-600">Mercy</span>
-                </div>
-                <div className="flex justify-between items-center py-2 border-b border-slate-100">
-                  <span className="text-xs font-medium text-slate-800">Theme</span>
-                  <span className="text-xs font-bold text-sky-600">Light Blue (iOS Style)</span>
-                </div>
                 <div className="flex justify-between items-center py-2">
-                  <span className="text-xs font-medium text-slate-800">AI Model</span>
-                  <span className="text-xs font-bold text-sky-600">Gemini Flash Lite</span>
+                  <span className="text-xs font-medium text-slate-800">Email</span>
+                  <span className="text-xs font-bold text-sky-600">{authUser.email}</span>
                 </div>
               </div>
 
               <div className="bg-white p-4 rounded-2xl border border-sky-100 shadow-sm space-y-3">
                 <h3 className="text-sm font-bold text-slate-900">Reminders</h3>
-                <p className="text-xs text-slate-600">Allow browser notifications to receive schedule reminders. The app must remain open; reminders are not guaranteed after closing the browser.</p>
+                <p className="text-xs text-slate-600">Mercy's Daily Notice is sent at 10:00 AM in your device's local time while My PA is open. Enable browser notifications for pop-ups, then tap Test chime once to allow sound. Daily alerts cannot arrive while the app is closed.</p>
                 <button type="button" onClick={enableNotifications} disabled={notificationPermission === 'granted' || notificationPermission === 'unsupported'} className="w-full inline-flex justify-center items-center gap-2 rounded-xl border border-sky-200 px-3 py-2 text-xs font-semibold text-sky-800 disabled:opacity-50">
                   <Bell size={14} />
-                  {notificationPermission === 'granted' ? 'Notifications enabled' : notificationPermission === 'denied' ? 'Notifications blocked in browser settings' : notificationPermission === 'unsupported' ? 'Notifications unsupported' : 'Enable notifications'}
+                  {notificationPermission === 'granted' ? 'Notifications enabled' : notificationPermission === 'denied' ? 'Notifications blocked in browser settings' : notificationPermission === 'unsupported' ? 'Notifications unsupported' : 'Enable notifications and sound'}
                 </button>
+                <label className="flex items-center justify-between gap-3 text-xs text-slate-700">
+                  <span>Play a gentle chime with reminders</span>
+                  <input
+                    type="checkbox"
+                    checked={soundEnabled}
+                    onChange={event => setSoundEnabled(event.target.checked)}
+                    className="h-4 w-4 accent-sky-600"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={testNotificationSound}
+                  disabled={!soundEnabled}
+                  className="w-full rounded-xl border border-sky-200 px-3 py-2 text-xs font-semibold text-sky-800 disabled:opacity-50"
+                >
+                  Test chime
+                </button>
+                {notificationError && <p role="alert" className="text-xs text-amber-800">{notificationError}</p>}
               </div>
 
               <div className="bg-white p-4 rounded-2xl border border-sky-100 shadow-sm space-y-3">
@@ -1246,7 +1592,10 @@ export default function App() {
         <div 
           ref={mercyButtonRef}
           style={position ? { left: `${position.x}px`, top: `${position.y}px` } : undefined}
-          onMouseDown={handleMouseDown}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
           onClick={() => {
             if (dragMovedRef.current) {
               dragMovedRef.current = false;
@@ -1254,12 +1603,10 @@ export default function App() {
             }
             setCurrentTab('ai');
           }}
-          className={`absolute z-50 cursor-grab active:cursor-grabbing group flex items-center gap-2 bg-gradient-to-r from-sky-500 to-sky-600 text-white p-3 rounded-full shadow-xl shadow-sky-300 hover:scale-105 transition-transform ${position ? '' : 'right-5 bottom-24'}`}
+          className={`absolute z-50 touch-none cursor-grab active:cursor-grabbing group flex items-center gap-2 bg-gradient-to-r from-sky-500 to-sky-600 text-white p-3 rounded-full shadow-xl shadow-sky-300 hover:scale-105 transition-transform ${position ? '' : 'right-5 bottom-24'}`}
           title="Drag me anywhere or click to talk to Mercy!"
         >
-          <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-white/20 text-white font-bold">
-            <Sparkles size={18} />
-          </div>
+          <img src="/pwa-icon-192.png" alt="" className="relative w-8 h-8 rounded-full" />
           <span className="text-xs font-semibold pr-2 hidden group-hover:inline-block transition-all">Talk to Mercy</span>
         </div>
 

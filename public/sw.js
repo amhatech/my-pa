@@ -1,5 +1,11 @@
-const CACHE_NAME = 'my-pa-shell-v1';
-const APP_SHELL = ['/', '/manifest.webmanifest', '/pwa-icon.svg'];
+const CACHE_NAME = 'my-pa-shell-v2';
+const APP_SHELL = [
+  '/',
+  '/manifest.webmanifest',
+  '/my-pa-logo.png',
+  '/pwa-icon-192.png',
+  '/pwa-icon-512.png',
+];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
