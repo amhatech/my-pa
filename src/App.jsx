@@ -23,12 +23,20 @@ import {
   Bell
 } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from './lib/supabase.js';
+import { applyMercyActions, parseMercyActions } from './lib/mercyActions.js';
+import { getTodayScheduleItems } from './lib/schedule.js';
 
 function getTimeGreeting(date = new Date()) {
   const hour = date.getHours();
   if (hour < 12) return 'Good morning';
   if (hour < 18) return 'Good afternoon';
   return 'Good evening';
+}
+
+function decodeVapidPublicKey(publicKey) {
+  const padding = '='.repeat((4 - publicKey.length % 4) % 4);
+  const base64 = `${publicKey}${padding}`.replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(base64), character => character.charCodeAt(0));
 }
 
 function useLocalStorageState(key, initialValue) {
@@ -69,6 +77,7 @@ export default function App() {
   const [timeGreeting, setTimeGreeting] = useState(getTimeGreeting);
   const [authUser, setAuthUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authMode, setAuthMode] = useState('sign-in');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
@@ -90,6 +99,7 @@ export default function App() {
     'Notification' in window ? Notification.permission : 'unsupported'
   );
   const [notificationError, setNotificationError] = useState('');
+  const [pushSubscriptionEnabled, setPushSubscriptionEnabled] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState('');
   
@@ -103,6 +113,7 @@ export default function App() {
   const recognitionRef = useRef(null);
   const audioContextRef = useRef(null);
   const dailyNoticeProcessingRef = useRef(new Set());
+  const sendMessageRef = useRef(null);
 
   const playNotificationChime = useCallback(() => {
     const audioContext = audioContextRef.current;
@@ -114,19 +125,21 @@ export default function App() {
     ) return;
 
     const startAt = audioContext.currentTime;
-    [659.25, 880].forEach((frequency, index) => {
-      const oscillator = audioContext.createOscillator();
-      const volume = audioContext.createGain();
-      const noteStart = startAt + index * 0.18;
-      oscillator.type = 'sine';
-      oscillator.frequency.value = frequency;
-      volume.gain.setValueAtTime(0.0001, noteStart);
-      volume.gain.exponentialRampToValueAtTime(0.12, noteStart + 0.025);
-      volume.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.32);
-      oscillator.connect(volume);
-      volume.connect(audioContext.destination);
-      oscillator.start(noteStart);
-      oscillator.stop(noteStart + 0.34);
+    [0, 1.05].forEach(chimeOffset => {
+      [659.25, 880].forEach((frequency, index) => {
+        const oscillator = audioContext.createOscillator();
+        const volume = audioContext.createGain();
+        const noteStart = startAt + chimeOffset + index * 0.18;
+        oscillator.type = 'sine';
+        oscillator.frequency.value = frequency;
+        volume.gain.setValueAtTime(0.0001, noteStart);
+        volume.gain.exponentialRampToValueAtTime(0.12, noteStart + 0.025);
+        volume.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.58);
+        oscillator.connect(volume);
+        volume.connect(audioContext.destination);
+        oscillator.start(noteStart);
+        oscillator.stop(noteStart + 0.6);
+      });
     });
   }, [soundEnabled]);
 
@@ -143,6 +156,13 @@ export default function App() {
   const [minimumScheduleTime] = useState(() => (
     new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
   ));
+  const todaysScheduleItems = getTodayScheduleItems(scheduleItems);
+  const priorityRank = { high: 0, medium: 1, low: 2 };
+  const mainPriorityTask = scheduleItems
+    .filter(item => item.type === 'Task' && !item.completed)
+    .sort((first, second) => (
+      (priorityRank[first.priority] ?? 1) - (priorityRank[second.priority] ?? 1)
+    ))[0];
 
   // Goals State
   const [goals, setGoals] = useLocalStorageState('my-pa-goals', [
@@ -169,6 +189,8 @@ export default function App() {
   const mercyButtonRef = useRef(null);
   const dragMovedRef = useRef(false);
   const dragStartRef = useRef(null);
+  const longPressTimerRef = useRef(null);
+  const longPressTriggeredRef = useRef(false);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => setTimeGreeting(getTimeGreeting()), 60_000);
@@ -281,27 +303,39 @@ export default function App() {
 
   useEffect(() => {
     if (notificationPermission !== 'granted') return undefined;
-    let lastCheckedAt = Date.now();
     const intervalId = window.setInterval(() => {
       const now = Date.now();
       scheduleItems.forEach(item => {
         if (!item.startsAt || item.completed) return;
         const notifyAt = new Date(item.startsAt).getTime() - (item.reminderMinutes ?? 10) * 60_000;
-        const storageKey = `my-pa-notified-${authUser?.id ?? 'local'}-${item.id}-${item.startsAt}`;
-        if (notifyAt > lastCheckedAt && notifyAt <= now && !window.localStorage.getItem(storageKey)) {
-          window.localStorage.setItem(storageKey, 'true');
+        const reminderAge = now - notifyAt;
+        const reminderKey = `my-pa-notified-${authUser?.id ?? 'local'}-${item.id}-${item.startsAt}`;
+        if (reminderAge >= 0 && reminderAge <= 120_000 && !window.localStorage.getItem(reminderKey)) {
+          window.localStorage.setItem(reminderKey, 'true');
           new Notification(`Upcoming: ${item.title}`, {
             body: `Your event starts at ${item.time}.`,
             icon: '/pwa-icon-192.png',
-            tag: storageKey,
+            tag: `schedule-${item.id}-${new Date(item.startsAt).getTime()}`,
+          });
+          playNotificationChime();
+        }
+
+        const lapseAt = new Date(item.startsAt).getTime() + 30 * 60_000;
+        const lapseAge = now - lapseAt;
+        const lapseKey = `my-pa-lapsed-${authUser?.id ?? 'local'}-${item.id}-${item.startsAt}`;
+        if (lapseAge >= 0 && lapseAge <= 120_000 && !window.localStorage.getItem(lapseKey)) {
+          window.localStorage.setItem(lapseKey, 'true');
+          new Notification(`Was ${item.title} completed?`, {
+            body: 'This scheduled time has passed. Mark it complete or reschedule it when you can.',
+            icon: '/pwa-icon-192.png',
+            tag: `schedule-lapsed-${item.id}-${new Date(item.startsAt).getTime()}`,
           });
           playNotificationChime();
         }
       });
-      lastCheckedAt = now;
     }, 15_000);
     return () => window.clearInterval(intervalId);
-  }, [scheduleItems, notificationPermission, authUser, playNotificationChime]);
+  }, [scheduleItems, notificationPermission, pushSubscriptionEnabled, authUser, playNotificationChime]);
 
   useEffect(() => {
     if (!authUser || !workspaceReady) return undefined;
@@ -321,7 +355,7 @@ export default function App() {
       );
       const upcomingGoals = goals.slice(0, 3).map(goal => goal.title);
       const fallbackNotice = [
-        `Good morning! Here is your Daily Notice for ${now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}.`,
+        `${getTimeGreeting(now)}! Here is your Daily Notice for ${now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}.`,
         todaysEvents.length
           ? `Today's schedule: ${todaysEvents.map(item => `${item.title} at ${item.time}`).join(', ')}.`
           : 'You have no events saved for today yet.',
@@ -333,7 +367,7 @@ export default function App() {
         if (supabase) {
           const { data, error } = await supabase.functions.invoke('mercy-chat', {
             body: {
-              message: `Write my concise, encouraging 10 AM Daily Notice for ${now.toLocaleDateString()} using only the supplied saved records. Mention today's scheduled events and one practical priority. If there are no events or goals, suggest adding one. Do not invent personal details.`,
+              message: `Write my concise, encouraging Daily Notice for the current local time ${now.toLocaleTimeString()} on ${now.toLocaleDateString()}. Use only the supplied saved records. Mention today's scheduled events and one practical priority. If there are no events or goals, suggest adding one. Do not invent personal details.`,
               history: [],
               context: { scheduleItems, goals, memories },
             },
@@ -358,7 +392,7 @@ export default function App() {
           new Notification("Mercy's Daily Notice", {
             body: notice.replace(/\s+/g, ' ').slice(0, 180),
             icon: '/pwa-icon-192.png',
-            tag: storageKey,
+            tag: `daily-notice-${dateKey}`,
           });
         } catch (error) {
           console.error('Could not show Mercy’s daily notification:', error);
@@ -381,6 +415,42 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [authUser, workspaceReady, scheduleItems, goals, memories, notificationPermission, playNotificationChime, setMessages]);
+
+  useEffect(() => {
+    if (
+      !authUser ||
+      notificationPermission !== 'granted' ||
+      !supabase ||
+      !('serviceWorker' in navigator) ||
+      !('PushManager' in window)
+    ) {
+      return undefined;
+    }
+
+    let active = true;
+    navigator.serviceWorker.ready
+      .then(async registration => {
+        const subscription = await registration.pushManager.getSubscription();
+        if (!subscription) return false;
+        const { data, error } = await supabase
+          .from('push_subscriptions')
+          .select('endpoint')
+          .eq('endpoint', subscription.endpoint)
+          .maybeSingle();
+        if (error) throw error;
+        return Boolean(data);
+      })
+      .then(enabled => {
+        if (active) setPushSubscriptionEnabled(enabled);
+      })
+      .catch(error => {
+        console.error('Could not check background notification status:', error);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authUser, notificationPermission]);
 
   useEffect(() => {
     if (!authUser || !supabase || profileLoading || profileNeedsUsername || profileError || !profileUsername) return undefined;
@@ -468,6 +538,7 @@ export default function App() {
   }, [messages, isThinking]);
 
   useEffect(() => () => {
+    window.clearTimeout(longPressTimerRef.current);
     recognitionRef.current?.abort();
     window.speechSynthesis?.cancel();
   }, []);
@@ -477,6 +548,14 @@ export default function App() {
     const frame = phoneFrameRef.current;
     const button = event.currentTarget;
     dragMovedRef.current = false;
+    longPressTriggeredRef.current = false;
+    window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTriggeredRef.current = true;
+      dragMovedRef.current = true;
+      setCurrentTab('ai');
+      startVoiceInput({ autoSend: true });
+    }, 3000);
     if (frame && button) {
       const frameBounds = frame.getBoundingClientRect();
       const buttonBounds = button.getBoundingClientRect();
@@ -496,6 +575,7 @@ export default function App() {
     if (!frame || !button || !start) return;
 
     if (!dragMovedRef.current && Math.hypot(event.clientX - start.pointerX, event.clientY - start.pointerY) < 6) return;
+    if (!longPressTriggeredRef.current) window.clearTimeout(longPressTimerRef.current);
 
     const newX = Math.max(12, Math.min(frame.clientWidth - button.offsetWidth - 12, start.x + event.clientX - start.pointerX));
     const newY = Math.max(12, Math.min(frame.clientHeight - button.offsetHeight - 12, start.y + event.clientY - start.pointerY));
@@ -503,11 +583,68 @@ export default function App() {
     setPosition({ x: newX, y: newY });
   };
   const handlePointerUp = () => {
+    window.clearTimeout(longPressTimerRef.current);
+    if (longPressTriggeredRef.current) recognitionRef.current?.stop();
     setIsDragging(false);
     dragStartRef.current = null;
   };
 
+  const enablePushNotifications = async () => {
+    if (!authUser || !supabase) {
+      setNotificationError('Sign in before enabling background notifications.');
+      return;
+    }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setNotificationError('Background push is not supported by this browser. You can still receive alerts while My PA is open.');
+      return;
+    }
+    const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
+    if (!vapidPublicKey) {
+      setNotificationError('Background notifications need the VAPID public key configured for this app.');
+      return;
+    }
+
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const existingSubscription = await registration.pushManager.getSubscription();
+      const subscription = existingSubscription ?? await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: decodeVapidPublicKey(vapidPublicKey),
+      });
+      const { error } = await supabase.from('push_subscriptions').upsert({
+        endpoint: subscription.endpoint,
+        user_id: authUser.id,
+        subscription: subscription.toJSON(),
+        time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'endpoint' });
+      if (error) throw error;
+      setPushSubscriptionEnabled(true);
+      setNotificationError('');
+    } catch (error) {
+      console.error('Could not enable background notifications:', error);
+      setNotificationError('Could not enable background delivery. Check the push notification setup and try again.');
+    }
+  };
+
   const enableNotifications = async () => {
+    setNotificationError('');
+    if (!('Notification' in window)) {
+      setNotificationPermission('unsupported');
+      return;
+    }
+
+    let permissionRequest;
+    try {
+      permissionRequest = Notification.permission === 'default'
+        ? Notification.requestPermission()
+        : Promise.resolve(Notification.permission);
+    } catch (error) {
+      console.error('Could not request notification permission:', error);
+      setNotificationError('Could not enable notifications. Check your browser settings.');
+      return;
+    }
+
     try {
       if ('AudioContext' in window) {
         audioContextRef.current ??= new window.AudioContext();
@@ -518,13 +655,11 @@ export default function App() {
       setNotificationError('Sound could not be enabled in this browser.');
     }
 
-    if (!('Notification' in window)) {
-      setNotificationPermission('unsupported');
-      return;
-    }
     try {
-      setNotificationPermission(await Notification.requestPermission());
-      setNotificationError('');
+      const permission = await permissionRequest;
+      setNotificationPermission(permission);
+      if (permission === 'granted') await enablePushNotifications();
+      else if (permission === 'denied') setNotificationError('Notifications are blocked. Allow them for My PA in your browser or device settings.');
     } catch (error) {
       console.error('Could not request notification permission:', error);
       setNotificationError('Could not enable notifications. Check your browser settings.');
@@ -547,7 +682,7 @@ export default function App() {
     }
   };
 
-  const startVoiceInput = () => {
+  const startVoiceInput = ({ autoSend = false } = {}) => {
     const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionApi) {
       setVoiceError('Voice typing is not supported here. You can still type your message.');
@@ -560,7 +695,9 @@ export default function App() {
     recognition.interimResults = false;
     recognition.onresult = event => {
       const transcript = event.results[0]?.[0]?.transcript;
-      if (transcript) setInputText(previous => `${previous}${previous ? ' ' : ''}${transcript}`);
+      if (!transcript) return;
+      setInputText(previous => `${previous}${previous ? ' ' : ''}${transcript}`);
+      if (autoSend) window.setTimeout(() => sendMessageRef.current?.(transcript), 0);
     };
     recognition.onerror = () => {
       setVoiceError('Microphone access failed. Check browser permission, or type your message instead.');
@@ -569,7 +706,13 @@ export default function App() {
     recognition.onend = () => setIsListening(false);
     recognitionRef.current = recognition;
     setIsListening(true);
-    recognition.start();
+    try {
+      recognition.start();
+    } catch (error) {
+      console.error('Could not start voice typing:', error);
+      setIsListening(false);
+      setVoiceError('Could not start voice typing. Check microphone permission and try again.');
+    }
   };
 
   const speakMessage = (text) => {
@@ -596,7 +739,10 @@ export default function App() {
     event.preventDefault();
     setAuthError('');
     setAuthNotice('');
-    if (!supabase) return;
+    if (!supabase) {
+      setAuthError('Email sign-in is unavailable because Supabase is not configured.');
+      return;
+    }
 
     const username = signupUsername.trim().toLowerCase();
     if (authMode === 'sign-up' && !/^[a-z0-9_]{3,20}$/.test(username)) {
@@ -604,22 +750,36 @@ export default function App() {
       return;
     }
 
-    const result = authMode === 'sign-up'
-      ? await supabase.auth.signUp({
-        email: authEmail,
-        password: authPassword,
-        options: { data: { username } },
-      })
-      : await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+    setAuthSubmitting(true);
+    try {
+      const email = authEmail.trim().toLowerCase();
+      const result = authMode === 'sign-up'
+        ? await supabase.auth.signUp({
+          email,
+          password: authPassword,
+          options: { data: { username } },
+        })
+        : await supabase.auth.signInWithPassword({ email, password: authPassword });
 
-    if (result.error) {
-      setAuthError(result.error.message);
-      return;
+      if (result.error) {
+        const message = result.error.message.toLowerCase();
+        setAuthError(message.includes('invalid login credentials')
+          ? 'That email and password do not match. Check them and try again.'
+          : message.includes('email not confirmed')
+            ? 'Please confirm your email using the link in your inbox, then sign in.'
+            : result.error.message);
+        return;
+      }
+      if (authMode === 'sign-up' && !result.data.session) {
+        setAuthNotice('Check your email to confirm your account, then sign in. Your chosen username will be saved after confirmation.');
+      }
+      setAuthPassword('');
+    } catch (error) {
+      console.error('Email authentication failed:', error);
+      setAuthError('Could not connect to email sign-in. Check your internet connection and try again.');
+    } finally {
+      setAuthSubmitting(false);
     }
-    if (authMode === 'sign-up' && !result.data.session) {
-      setAuthNotice('Check your email to confirm your account, then sign in. Your chosen username will be saved after confirmation.');
-    }
-    setAuthPassword('');
   };
 
   const handleGoogleSignIn = async () => {
@@ -661,6 +821,31 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    try {
+      if ('serviceWorker' in navigator) {
+        const registration = await navigator.serviceWorker.ready;
+        const pushSubscription = registration.pushManager
+          ? await registration.pushManager.getSubscription()
+          : null;
+        if (pushSubscription) {
+          if (supabase && authUser) {
+            const { error: deleteSubscriptionError } = await supabase
+              .from('push_subscriptions')
+              .delete()
+              .eq('endpoint', pushSubscription.endpoint)
+              .eq('user_id', authUser.id);
+            if (deleteSubscriptionError) throw deleteSubscriptionError;
+          }
+          const unsubscribed = await pushSubscription.unsubscribe();
+          if (!unsubscribed) throw new Error('The browser did not remove the push subscription.');
+        }
+      }
+    } catch (error) {
+      console.error('Could not disable push notifications before sign-out:', error);
+      setNotificationError('Could not turn off background notifications. Check your connection and try again before signing out.');
+      return;
+    }
+
     const { error } = await supabase.auth.signOut();
     if (error) {
       setAuthError(`Could not sign out: ${error.message}`);
@@ -673,6 +858,7 @@ export default function App() {
     setScheduleItems([]);
     setGoals([]);
     setMemories([]);
+    setPushSubscriptionEnabled(false);
   };
 
   const exportWorkspace = () => {
@@ -718,10 +904,11 @@ export default function App() {
 
   // Send message to Gemini AI (Mercy) with full context
   const handleSendMessage = async (e) => {
-    e.preventDefault();
-    if (!inputText.trim() || isThinking) return;
+    e?.preventDefault?.();
+    const messageToSend = typeof e === 'string' ? e : inputText;
+    if (!messageToSend.trim() || isThinking) return;
 
-    const userMessage = inputText.trim();
+    const userMessage = messageToSend.trim();
     setInputText('');
     setMessages(prev => [...prev, { sender: 'user', text: userMessage }]);
     setIsThinking(true);
@@ -735,51 +922,34 @@ export default function App() {
         body: {
           message: userMessage,
           history,
-          context: { scheduleItems, goals, memories },
+          context: {
+            scheduleItems,
+            goals,
+            memories,
+            currentDateTime: new Date().toISOString(),
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+          },
         },
       });
       if (error) throw error;
 
-      const taskIds = new Set(
+      const existingTaskIds = new Set(
         scheduleItems.filter(item => item.type === 'Task').map(item => String(item.id))
       );
-      const rawProposal = data?.taskProposal;
-      let taskProposal = null;
-      if (rawProposal && Array.isArray(rawProposal.tasks)) {
-        const proposedTasks = [];
-        const seenExistingIds = new Set();
-        let newTaskCount = 0;
-        for (const task of rawProposal.tasks.slice(0, taskIds.size + 3)) {
-          if (typeof task?.title !== 'string' || !task.title.trim() || task.title.trim().length > 120) continue;
-          if (!['high', 'medium', 'low'].includes(task.priority)) continue;
-          const existingTaskId = task.existingTaskId === null ? null : String(task.existingTaskId);
-          if (existingTaskId === null) {
-            if (newTaskCount >= 3) continue;
-            newTaskCount += 1;
-          } else if (!taskIds.has(existingTaskId) || seenExistingIds.has(existingTaskId)) {
-            continue;
-          } else {
-            seenExistingIds.add(existingTaskId);
-          }
-          proposedTasks.push({
-            existingTaskId,
-            title: task.title.trim(),
-            priority: task.priority,
-          });
-        }
-        if (proposedTasks.length) {
-          taskProposal = {
-            summary: typeof rawProposal.summary === 'string' ? rawProposal.summary.slice(0, 300) : 'Review Mercy’s suggested task order.',
-            tasks: proposedTasks,
-            status: 'pending',
-          };
-        }
+      const actions = parseMercyActions(data?.actions, new Date(), existingTaskIds);
+      const applied = applyMercyActions(actions, scheduleItems, memories);
+      if (applied.appliedCount) {
+        setScheduleItems(applied.scheduleItems);
+        setMemories(applied.memories);
       }
 
       const mercyReply = typeof data?.reply === 'string' && data.reply.trim()
         ? data.reply.trim()
         : "I couldn't get a reply just now. Please try again.";
-      setMessages(prev => [...prev, { sender: 'mercy', text: mercyReply, ...(taskProposal ? { taskProposal } : {}) }]);
+      const actionConfirmation = applied.appliedCount
+        ? `\n\nI’ve saved ${applied.appliedCount} update${applied.appliedCount === 1 ? '' : 's'} for you.`
+        : '';
+      setMessages(prev => [...prev, { sender: 'mercy', text: `${mercyReply}${actionConfirmation}` }]);
     } catch (error) {
       console.error('Error connecting to Mercy AI:', error);
       const errorStatus = error?.context?.status ?? error?.status;
@@ -791,6 +961,9 @@ export default function App() {
       setIsThinking(false);
     }
   };
+  useEffect(() => {
+    sendMessageRef.current = handleSendMessage;
+  });
 
   const updateTaskProposal = (messageIndex, update) => {
     setMessages(previous => previous.map((message, index) => (
@@ -1037,17 +1210,17 @@ export default function App() {
               <input
                 type="password"
                 autoComplete={authMode === 'sign-in' ? 'current-password' : 'new-password'}
-                minLength={8}
+                minLength={authMode === 'sign-up' ? 8 : undefined}
                 required
                 value={authPassword}
                 onChange={event => setAuthPassword(event.target.value)}
-                placeholder="Password (at least 8 characters)"
+                placeholder={authMode === 'sign-up' ? 'Password (at least 8 characters)' : 'Password'}
                 className="w-full rounded-xl border border-sky-200 px-4 py-3 text-sm"
               />
               {authError && <p role="alert" className="text-sm text-red-600">{authError}</p>}
               {authNotice && <p role="status" className="text-sm text-emerald-700">{authNotice}</p>}
-              <button type="submit" className="w-full rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white">
-                {authMode === 'sign-in' ? 'Sign in' : 'Create account'}
+              <button type="submit" disabled={authSubmitting} className="w-full rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white disabled:opacity-60">
+                {authSubmitting ? 'Connecting…' : authMode === 'sign-in' ? 'Sign in' : 'Create account'}
               </button>
               <button
                 type="button"
@@ -1127,14 +1300,28 @@ export default function App() {
                     <span className="w-2 h-2 rounded-full bg-sky-500"></span>
                     Main Priority
                   </h3>
-                  <span className="text-xs text-sky-600 font-semibold bg-sky-50 px-2 py-0.5 rounded">In Progress</span>
+                  {mainPriorityTask && (
+                    <span className="text-xs text-sky-600 font-semibold bg-sky-50 px-2 py-0.5 rounded">
+                      {mainPriorityTask.priority ?? 'Next up'}
+                    </span>
+                  )}
                 </div>
                 <div className="bg-sky-50/50 rounded-xl p-3 border border-sky-100 flex items-center justify-between">
                   <div>
-                    <h4 className="text-sm font-semibold text-slate-900">Complete Book Chapter 4</h4>
-                    <p className="text-xs text-slate-500 mt-0.5">Target: Finish manuscript editing</p>
+                    <h4 className="text-sm font-semibold text-slate-900">
+                      {mainPriorityTask?.title ?? 'No tasks yet'}
+                    </h4>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {mainPriorityTask?.notes ?? 'Tell Mercy what you need to do and she’ll organise it for you.'}
+                    </p>
                   </div>
-                  <CheckCircle2 className="text-sky-500" size={22} />
+                  {mainPriorityTask ? (
+                    <CheckCircle2 className="text-sky-500" size={22} />
+                  ) : (
+                    <button onClick={() => setCurrentTab('ai')} className="text-xs font-semibold text-sky-700">
+                      Add with Mercy
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1148,7 +1335,7 @@ export default function App() {
                 </div>
                 
                 <div className="space-y-2.5">
-                  {scheduleItems.slice(0, 2).map(item => (
+                  {todaysScheduleItems.map(item => (
                     <div key={item.id} className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-sky-50/50 transition-colors border border-slate-100">
                       <div className="text-xs font-bold text-sky-600 bg-sky-100 px-2.5 py-1 rounded-lg">{item.time}</div>
                       <div className="flex-1">
@@ -1157,6 +1344,9 @@ export default function App() {
                       </div>
                     </div>
                   ))}
+                  {todaysScheduleItems.length === 0 && (
+                    <p className="py-2 text-xs text-slate-500">Nothing scheduled for today. Ask Mercy to add it whenever you’re ready.</p>
+                  )}
                 </div>
               </div>
             </>
@@ -1344,7 +1534,11 @@ export default function App() {
                       </button>
                       <div>
                         <span className="text-[9px] font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded uppercase">{item.type}</span>
+                        {item.type === 'Task' && item.priority && (
+                          <span className="ml-1 text-[9px] font-semibold text-slate-500">{item.priority} priority</span>
+                        )}
                         <h4 className={`text-xs font-bold mt-0.5 ${item.completed ? 'line-through text-slate-400' : 'text-slate-900'}`}>{item.title}</h4>
+                        {item.notes && <p className="mt-0.5 text-[10px] text-slate-500">{item.notes}</p>}
                         <p className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5"><Clock size={10} /> {item.startsAt ? new Date(item.startsAt).toLocaleString() : item.time}</p>
                       </div>
                     </div>
@@ -1508,13 +1702,21 @@ export default function App() {
 
               <div className="bg-white p-4 rounded-2xl border border-sky-100 shadow-sm space-y-3">
                 <h3 className="text-sm font-bold text-slate-900">Reminders</h3>
-                <p className="text-xs text-slate-600">Mercy's Daily Notice is sent at 10:00 AM in your device's local time while My PA is open. Enable browser notifications for pop-ups, then tap Test chime once to allow sound. Daily alerts cannot arrive while the app is closed.</p>
-                <button type="button" onClick={enableNotifications} disabled={notificationPermission === 'granted' || notificationPermission === 'unsupported'} className="w-full inline-flex justify-center items-center gap-2 rounded-xl border border-sky-200 px-3 py-2 text-xs font-semibold text-sky-800 disabled:opacity-50">
+                <p className="text-xs text-slate-600">Enable pop-ups here for schedule reminders and Mercy’s 10:00 AM Daily Notice. Your browser will ask you to allow notifications. Background delivery also requires push setup for this app.</p>
+                <button type="button" onClick={enableNotifications} disabled={notificationPermission === 'denied' || notificationPermission === 'unsupported'} className="w-full inline-flex justify-center items-center gap-2 rounded-xl border border-sky-200 px-3 py-2 text-xs font-semibold text-sky-800 disabled:opacity-50">
                   <Bell size={14} />
-                  {notificationPermission === 'granted' ? 'Notifications enabled' : notificationPermission === 'denied' ? 'Notifications blocked in browser settings' : notificationPermission === 'unsupported' ? 'Notifications unsupported' : 'Enable notifications and sound'}
+                  {notificationPermission === 'denied'
+                    ? 'Notifications blocked in browser settings'
+                    : notificationPermission === 'unsupported'
+                      ? 'Notifications unsupported'
+                      : pushSubscriptionEnabled
+                        ? 'Push subscription saved'
+                        : notificationPermission === 'granted'
+                          ? 'Enable background notifications'
+                          : 'Enable pop-up notifications'}
                 </button>
                 <label className="flex items-center justify-between gap-3 text-xs text-slate-700">
-                  <span>Play a gentle chime with reminders</span>
+                  <span>Play a gentle two-second chime with reminders</span>
                   <input
                     type="checkbox"
                     checked={soundEnabled}
@@ -1597,17 +1799,21 @@ export default function App() {
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
           onClick={() => {
+            if (longPressTriggeredRef.current) {
+              longPressTriggeredRef.current = false;
+              return;
+            }
             if (dragMovedRef.current) {
               dragMovedRef.current = false;
               return;
             }
             setCurrentTab('ai');
           }}
-          className={`absolute z-50 touch-none cursor-grab active:cursor-grabbing group flex items-center gap-2 bg-gradient-to-r from-sky-500 to-sky-600 text-white p-3 rounded-full shadow-xl shadow-sky-300 hover:scale-105 transition-transform ${position ? '' : 'right-5 bottom-24'}`}
-          title="Drag me anywhere or click to talk to Mercy!"
+          className={`absolute z-50 touch-none cursor-grab active:cursor-grabbing group flex items-center gap-2 ${isListening ? 'bg-red-500' : 'bg-gradient-to-r from-sky-500 to-sky-600'} text-white p-3 rounded-full shadow-xl shadow-sky-300 hover:scale-105 transition-transform ${position ? '' : 'right-5 bottom-24'}`}
+          title="Tap to chat, hold for 3 seconds to talk"
         >
           <img src="/pwa-icon-192.png" alt="" className="relative w-8 h-8 rounded-full" />
-          <span className="text-xs font-semibold pr-2 hidden group-hover:inline-block transition-all">Talk to Mercy</span>
+          <span className="text-xs font-semibold pr-2 hidden group-hover:inline-block transition-all">{isListening ? 'Listening…' : 'Tap to chat · hold to talk'}</span>
         </div>
 
       </div>

@@ -68,7 +68,18 @@ Deno.serve(async (request) => {
         body: JSON.stringify({
           systemInstruction: {
             parts: [{
-              text: `You are Mercy, a warm, thoughtful, practical woman personal assistant. Speak naturally and kindly. Help the user plan, reason, learn, and organise using only their supplied records. Never invent personal facts, dates, or commitments. If information is missing, say so and ask one useful question. Never claim a task was changed: when the user asks to organise, prioritise, reorder, or create tasks, return a proposed task plan for the user to review and confirm in the app. For ordinary chat, taskProposal must be null. A task plan may reorder only existing schedule records whose type is "Task" and may add up to three new tasks if the user requested tasks be created. Include each existing task ID exactly once, use its exact ID as a string, and do not include or modify schedule records of other types. Do not invent due dates or times. Keep replies concise and include a brief plan summary.\n\nReturn only the requested JSON structure. The user's current saved schedule, goals, and notes follow:\n${JSON.stringify(context)}`,
+              text: `You are Mercy, a capable professional personal assistant. Be warm, decisive, concise, and practical. Reduce effort for a user who struggles to get started: do not ask for confirmation before saving a clear request, do not ask the user which category to use, and do not ask follow-up questions unless a missing detail is essential to prevent a wrong or unsafe action. Use common sense and the user's saved records.
+
+When the user's message clearly asks you to do something, immediately return the appropriate saved action:
+- Create or update a task for things to do, including a commitment with no clear date/time. Use type "task".
+- Put an appointment, meeting, meal, workout, or other event on the schedule only when its date and time are clear from the message and current local time. Use type "event" and provide startsAt as a future ISO-8601 timestamp. If the date/time is not clear, make it an unscheduled task instead of asking.
+- Save a preference, personal fact, or information explicitly offered to remember as a memory. Use type "memory", with a short title, the exact useful detail, and category Preference, Personal, Idea, or Note.
+- When organising existing tasks, return task actions for the existing items in the requested order, using each exact existingTaskId and preserving their meaning. Set a sensible priority. Only add new tasks when the user asks or a clear new action is present.
+- For ordinary conversation with no requested record change, return an empty actions array. Never invent user facts, events, or commitments. Do not say an action was saved unless it is present in actions.
+
+Use the supplied current date, local time, and time zone when interpreting relative dates such as today or tomorrow. Keep the reply brief. Actions are applied automatically by the app, so only include changes clearly supported by the user's message.
+
+Return only the requested JSON structure. The user's current saved schedule, goals, and notes follow:\n${JSON.stringify(context)}`,
             }],
           },
           contents: [
@@ -83,28 +94,25 @@ Deno.serve(async (request) => {
               type: 'OBJECT',
               properties: {
                 reply: { type: 'STRING' },
-                taskProposal: {
-                  type: 'OBJECT',
-                  nullable: true,
-                  properties: {
-                    summary: { type: 'STRING' },
-                    tasks: {
-                      type: 'ARRAY',
-                      items: {
-                        type: 'OBJECT',
-                        properties: {
-                          existingTaskId: { type: 'STRING', nullable: true },
-                          title: { type: 'STRING' },
-                          priority: { type: 'STRING', enum: ['high', 'medium', 'low'] },
-                        },
-                        required: ['existingTaskId', 'title', 'priority'],
-                      },
+                actions: {
+                  type: 'ARRAY',
+                  items: {
+                    type: 'OBJECT',
+                    properties: {
+                      type: { type: 'STRING', enum: ['task', 'event', 'memory'] },
+                      title: { type: 'STRING' },
+                      details: { type: 'STRING' },
+                      startsAt: { type: 'STRING' },
+                      reminderMinutes: { type: 'INTEGER' },
+                      priority: { type: 'STRING', enum: ['high', 'medium', 'low'] },
+                      category: { type: 'STRING' },
+                      existingTaskId: { type: 'STRING' },
                     },
+                    required: ['type', 'title', 'details', 'startsAt', 'reminderMinutes', 'priority', 'category', 'existingTaskId'],
                   },
-                  required: ['summary', 'tasks'],
                 },
               },
-              required: ['reply', 'taskProposal'],
+              required: ['reply', 'actions'],
             },
           },
         }),
@@ -136,7 +144,7 @@ Deno.serve(async (request) => {
     return Response.json({ error: 'The AI service returned an empty reply.' }, { status: 502, headers: corsHeaders });
   }
 
-  let structuredReply: { reply?: unknown; taskProposal?: unknown };
+  let structuredReply: { reply?: unknown; actions?: unknown };
   try {
     structuredReply = JSON.parse(responseText);
   } catch {
@@ -150,6 +158,6 @@ Deno.serve(async (request) => {
 
   return Response.json({
     reply: structuredReply.reply.trim(),
-    taskProposal: structuredReply.taskProposal ?? null,
+    actions: Array.isArray(structuredReply.actions) ? structuredReply.actions.slice(0, 8) : [],
   }, { headers: corsHeaders });
 });

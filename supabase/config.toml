@@ -3,3 +3,6 @@ verify_jwt = true
 
 [functions.delete-account]
 verify_jwt = true
+
+[functions.send-push-notifications]
+verify_jwt = false

@@ -8,9 +8,9 @@ React and Vite personal assistant with Supabase authentication/storage and a Gem
 2. Copy `.env.example` to `.env.local`.
 3. In Supabase Project Settings → API, copy the Project URL and publishable/anon key into `.env.local`.
    Never use a service-role or secret key in a browser environment variable.
-4. In the Supabase SQL Editor, run `supabase/migrations/20261025000000_user_workspace.sql`.
+4. In the Supabase SQL Editor, run `supabase/migrations/20261025000000_user_workspace.sql` and `supabase/migrations/20261028000000_push_notifications.sql`.
 5. Set the Edge Function secrets `GEMINI_API_KEY` and `APP_ORIGIN` (your exact deployed site origin, such as `https://example.com`) in Supabase. For account deletion, also set `SUPABASE_SERVICE_ROLE_KEY` as a server-side function secret. Do not add these secrets to `.env.local`.
-6. Deploy `supabase/functions/mercy-chat` and `supabase/functions/delete-account`, along with `supabase/config.toml`, using the Supabase CLI or dashboard.
+6. Deploy `supabase/functions/mercy-chat`, `supabase/functions/delete-account`, and `supabase/functions/send-push-notifications`, along with `supabase/config.toml`, using the Supabase CLI or dashboard.
 7. In Supabase Authentication settings, enable email sign-up, set the local Site URL to `http://localhost:5173`, and add local and deployed app URLs to the allowed redirect URLs.
 8. To enable Google sign-in, create a Google OAuth web client, add Supabase's callback URL shown under the Google provider in the Google OAuth client's authorized redirect URIs, then enable Google under Supabase Authentication → Providers and enter the client ID and secret there. Never put the Google client secret in `.env.local`.
 9. Restart Vite with `npm run dev`. When creating an email/password account, choose a unique username in the sign-up form. Google sign-in users choose a username after their first sign-in. New accounts automatically start with an empty cloud workspace.
@@ -27,12 +27,27 @@ The app requires the Supabase schema and Edge Function to be deployed before clo
 - New accounts automatically start with an empty cloud workspace.
 - AI requests routed through an authenticated Supabase Edge Function; Gemini credentials stay server-side.
 - Browser speech-to-text and spoken playback for AI replies where the browser supports them.
+- Mercy can automatically save clear user requests as tasks, schedule events, or memories; task priority is saved with each task.
+- A three-second hold on Mercy's floating button starts voice typing and sends the recognized request automatically where browser speech recognition is supported.
+- A custom two-second chime plays for foreground reminders after the user enables sound.
+- Schedule notifications can report an event as overdue after 30 minutes if it remains incomplete.
 - Event date/time, configurable reminder lead time, and browser notifications while the app is open and notification permission is granted.
-- Mercy's Daily Notice is generated at 10:00 AM local time while the app is open; browser notification permission and an unlocked browser audio context are needed for alerts and the optional chime.
+- Background schedule reminders and Mercy's 10:00 AM local Daily Notice use Web Push when VAPID, database, and scheduled Edge Function delivery are configured.
 - JSON data export, cloud-record deletion, account deletion (requires its Edge Function and service-role secret), and sign-out controls.
 - A production PWA manifest, cached app shell, and service worker registration.
 
-Google sign-in requires OAuth provider configuration before it can be used. Google Calendar OAuth, notifications while the browser/app is closed, AI record-editing actions, recurring tasks, full offline conflict resolution, and wake-word voice activation are not implemented. Browser speech recognition and notification support vary by browser and operating system; browser reminders and the Daily Notice are best-effort and require the app to remain open. The browser or operating system controls the sound of system notifications; My PA can play its optional custom chime while the page is active.
+Google sign-in requires OAuth provider configuration before it can be used. Google Calendar OAuth, recurring tasks, full offline conflict resolution, and wake-word voice activation are not implemented. Browser speech recognition and notification support vary by browser and operating system. The browser or operating system controls the sound of notifications delivered while the app is closed; the custom chime is played while the app is open.
+
+### Background push setup
+
+Background push is opt-in. The user must sign in, open Settings → Reminders, and allow notifications. Browser permission cannot be granted by the app without that gesture. To deliver notifications while the app is closed:
+
+1. Generate a VAPID key pair with `npx --yes web-push generate-vapid-keys`. Set the public key as `VITE_VAPID_PUBLIC_KEY` in Vercel (and `.env.local` for local development), then rebuild/redeploy the frontend. The public key is not a secret.
+2. Set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (for example `mailto:admin@example.com`), and a random `PUSH_CRON_SECRET` as Supabase Edge Function secrets. Keep the VAPID private key and cron secret server-side.
+3. Deploy `send-push-notifications` and run the push migration above. Configure Supabase Cron to POST to `https://PROJECT_REF.supabase.co/functions/v1/send-push-notifications` every minute with the header `x-cron-secret` set to the same `PUSH_CRON_SECRET`.
+4. Enable and test notifications from a supported browser or installed PWA. iOS requires the app to be installed to the Home Screen for Web Push.
+
+Until these deployment settings and the Cron job are configured, only foreground browser reminders work. Pop-up permission and sound must be enabled by the user in Settings; the app cannot switch on device permissions itself.
 
 ## Security and data
 
