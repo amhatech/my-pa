@@ -23,6 +23,7 @@ import {
   Bell
 } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from './lib/supabase.js';
+import { VAPID_PUBLIC_KEY } from './lib/push.js';
 import { applyMercyActions, parseMercyActions } from './lib/mercyActions.js';
 import { getTodayScheduleItems } from './lib/schedule.js';
 
@@ -316,6 +317,8 @@ export default function App() {
             body: `Your event starts at ${item.time}.`,
             icon: '/pwa-icon-192.png',
             tag: `schedule-${item.id}-${new Date(item.startsAt).getTime()}`,
+            requireInteraction: true,
+            vibrate: [200, 100, 200, 100, 400],
           });
           playNotificationChime();
         }
@@ -329,6 +332,8 @@ export default function App() {
             body: 'This scheduled time has passed. Mark it complete or reschedule it when you can.',
             icon: '/pwa-icon-192.png',
             tag: `schedule-lapsed-${item.id}-${new Date(item.startsAt).getTime()}`,
+            requireInteraction: true,
+            vibrate: [200, 100, 200, 100, 400],
           });
           playNotificationChime();
         }
@@ -598,18 +603,12 @@ export default function App() {
       setNotificationError('Background push is not supported by this browser. You can still receive alerts while My PA is open.');
       return;
     }
-    const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
-    if (!vapidPublicKey) {
-      setNotificationError('Background notifications need the VAPID public key configured for this app.');
-      return;
-    }
-
     try {
       const registration = await navigator.serviceWorker.ready;
       const existingSubscription = await registration.pushManager.getSubscription();
       const subscription = existingSubscription ?? await registration.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: decodeVapidPublicKey(vapidPublicKey),
+        applicationServerKey: decodeVapidPublicKey(VAPID_PUBLIC_KEY),
       });
       const { error } = await supabase.from('push_subscriptions').upsert({
         endpoint: subscription.endpoint,
@@ -936,11 +935,13 @@ export default function App() {
       const existingTaskIds = new Set(
         scheduleItems.filter(item => item.type === 'Task').map(item => String(item.id))
       );
-      const actions = parseMercyActions(data?.actions, new Date(), existingTaskIds);
-      const applied = applyMercyActions(actions, scheduleItems, memories);
+      const existingGoalIds = new Set(goals.map(goal => String(goal.id)));
+      const actions = parseMercyActions(data?.actions, new Date(), existingTaskIds, existingGoalIds);
+      const applied = applyMercyActions(actions, scheduleItems, memories, goals);
       if (applied.appliedCount) {
         setScheduleItems(applied.scheduleItems);
         setMemories(applied.memories);
+        setGoals(applied.goals);
       }
 
       const mercyReply = typeof data?.reply === 'string' && data.reply.trim()
@@ -1107,8 +1108,12 @@ export default function App() {
 
   if (authLoading || profileLoading || workspaceLoading) {
     return (
-      <main className="min-h-screen flex items-center justify-center bg-[#f4f8fc] p-6">
-        <p className="text-sm text-sky-800">Connecting securely to your My PA account…</p>
+      <main className="min-h-screen flex flex-col items-center justify-center gap-5 bg-[#f4f8fc] p-6" aria-live="polite">
+        <img src="/my-pa-logo.png" alt="My PA" className="h-24 w-24 rounded-3xl object-cover shadow-lg shadow-sky-200 animate-logo-spin" />
+        <div className="text-center">
+          <h1 className="text-xl font-bold text-slate-900">My PA</h1>
+          <p className="mt-2 text-sm text-sky-800">Connecting securely to your My PA account…</p>
+        </div>
       </main>
     );
   }
@@ -1581,6 +1586,7 @@ export default function App() {
                       <div>
                         <span className="text-[10px] font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded">{goal.category}</span>
                         <h4 className="text-xs font-bold text-slate-900 mt-1">{goal.title}</h4>
+                        {goal.notes && <p className="mt-1 text-[10px] text-slate-500">{goal.notes}</p>}
                       </div>
                       <span className="text-[11px] font-semibold text-slate-500">{goal.deadline}</span>
                     </div>

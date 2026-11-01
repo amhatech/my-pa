@@ -58,7 +58,8 @@ self.addEventListener('push', event => {
     badge: '/pwa-icon-192.png',
     tag: typeof payload.tag === 'string' ? payload.tag : undefined,
     data: { url: typeof payload.url === 'string' ? payload.url : '/' },
-    vibrate: [150, 80, 150, 80, 250],
+    vibrate: [200, 100, 200, 100, 400],
+    requireInteraction: true,
   };
 
   event.waitUntil(self.registration.showNotification(title, options));

@@ -29,7 +29,7 @@ The app requires the Supabase schema and Edge Function to be deployed before clo
 - Browser speech-to-text and spoken playback for AI replies where the browser supports them.
 - Mercy can automatically save clear user requests as tasks, schedule events, or memories; task priority is saved with each task.
 - A three-second hold on Mercy's floating button starts voice typing and sends the recognized request automatically where browser speech recognition is supported.
-- A custom two-second chime plays for foreground reminders after the user enables sound.
+- A custom two-second chime plays for foreground reminders after the user enables sound; schedule alerts request persistent notifications and vibration where supported.
 - Schedule notifications can report an event as overdue after 30 minutes if it remains incomplete.
 - Event date/time, configurable reminder lead time, and browser notifications while the app is open and notification permission is granted.
 - Background schedule reminders and Mercy's 10:00 AM local Daily Notice use Web Push when VAPID, database, and scheduled Edge Function delivery are configured.
@@ -42,12 +42,11 @@ Google sign-in requires OAuth provider configuration before it can be used. Goog
 
 Background push is opt-in. The user must sign in, open Settings → Reminders, and allow notifications. Browser permission cannot be granted by the app without that gesture. To deliver notifications while the app is closed:
 
-1. Generate a VAPID key pair with `npx --yes web-push generate-vapid-keys`. Set the public key as `VITE_VAPID_PUBLIC_KEY` in Vercel (and `.env.local` for local development), then rebuild/redeploy the frontend. The public key is not a secret.
-2. Set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (for example `mailto:admin@example.com`), and a random `PUSH_CRON_SECRET` as Supabase Edge Function secrets. Keep the VAPID private key and cron secret server-side.
+1. The VAPID public key is bundled in `src/lib/push.js` and is safe to publish. The matching `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, and random `PUSH_CRON_SECRET` must only be stored as Supabase Edge Function secrets.
 3. Deploy `send-push-notifications` and run the push migration above. Configure Supabase Cron to POST to `https://PROJECT_REF.supabase.co/functions/v1/send-push-notifications` every minute with the header `x-cron-secret` set to the same `PUSH_CRON_SECRET`.
 4. Enable and test notifications from a supported browser or installed PWA. iOS requires the app to be installed to the Home Screen for Web Push.
 
-Until these deployment settings and the Cron job are configured, only foreground browser reminders work. Pop-up permission and sound must be enabled by the user in Settings; the app cannot switch on device permissions itself.
+Until the database migration and Cron job are configured, only foreground browser reminders work. Pop-up permission and sound must be enabled by the user in Settings; the app cannot switch on device permissions itself. Background notification audio is chosen by the operating system and can be silenced by device settings, Focus modes, or Do Not Disturb; a website cannot guarantee an alarm will wake someone.
 
 ## Security and data
 

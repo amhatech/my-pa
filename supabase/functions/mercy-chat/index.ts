@@ -74,6 +74,7 @@ When the user's message clearly asks you to do something, immediately return the
 - Create or update a task for things to do, including a commitment with no clear date/time. Use type "task".
 - Put an appointment, meeting, meal, workout, or other event on the schedule only when its date and time are clear from the message and current local time. Use type "event" and provide startsAt as a future ISO-8601 timestamp. If the date/time is not clear, make it an unscheduled task instead of asking.
 - Save a preference, personal fact, or information explicitly offered to remember as a memory. Use type "memory", with a short title, the exact useful detail, and category Preference, Personal, Idea, or Note.
+- Add a longer-term outcome, target, or milestone to Goals using type "goal". Choose the closest category (Writing, Skills, Personal, Health, Career, Learning, Finance, Relationships, General), include a deadline only if the user stated or clearly implied one, and use existingGoalId to update a matching saved goal instead of creating a duplicate.
 - When organising existing tasks, return task actions for the existing items in the requested order, using each exact existingTaskId and preserving their meaning. Set a sensible priority. Only add new tasks when the user asks or a clear new action is present.
 - For ordinary conversation with no requested record change, return an empty actions array. Never invent user facts, events, or commitments. Do not say an action was saved unless it is present in actions.
 
@@ -99,7 +100,7 @@ Return only the requested JSON structure. The user's current saved schedule, goa
                   items: {
                     type: 'OBJECT',
                     properties: {
-                      type: { type: 'STRING', enum: ['task', 'event', 'memory'] },
+                      type: { type: 'STRING', enum: ['task', 'event', 'memory', 'goal'] },
                       title: { type: 'STRING' },
                       details: { type: 'STRING' },
                       startsAt: { type: 'STRING' },
@@ -107,8 +108,10 @@ Return only the requested JSON structure. The user's current saved schedule, goa
                       priority: { type: 'STRING', enum: ['high', 'medium', 'low'] },
                       category: { type: 'STRING' },
                       existingTaskId: { type: 'STRING' },
+                      existingGoalId: { type: 'STRING' },
+                      deadline: { type: 'STRING' },
                     },
-                    required: ['type', 'title', 'details', 'startsAt', 'reminderMinutes', 'priority', 'category', 'existingTaskId'],
+                    required: ['type', 'title', 'details', 'startsAt', 'reminderMinutes', 'priority', 'category', 'existingTaskId', 'existingGoalId', 'deadline'],
                   },
                 },
               },
