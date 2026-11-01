@@ -29,14 +29,14 @@ The app requires the Supabase schema and Edge Function to be deployed before clo
 - Browser speech-to-text and spoken playback for AI replies where the browser supports them.
 - Mercy can automatically save clear user requests as tasks, schedule events, or memories; task priority is saved with each task.
 - A three-second hold on Mercy's floating button starts voice typing and sends the recognized request automatically where browser speech recognition is supported.
-- A custom two-second chime plays for foreground reminders after the user enables sound; schedule alerts request persistent notifications and vibration where supported.
+- A louder, selectable short chime or five-second alarm plays for foreground reminders after the user enables sound; schedule alerts request persistent notifications and vibration where supported.
 - Schedule notifications can report an event as overdue after 30 minutes if it remains incomplete.
 - Event date/time, configurable reminder lead time, and browser notifications while the app is open and notification permission is granted.
 - Background schedule reminders and Mercy's 10:00 AM local Daily Notice use Web Push when VAPID, database, and scheduled Edge Function delivery are configured.
 - JSON data export, cloud-record deletion, account deletion (requires its Edge Function and service-role secret), and sign-out controls.
 - A production PWA manifest, cached app shell, and service worker registration.
 
-Google sign-in requires OAuth provider configuration before it can be used. Google Calendar OAuth, recurring tasks, full offline conflict resolution, and wake-word voice activation are not implemented. Browser speech recognition and notification support vary by browser and operating system. The browser or operating system controls the sound of notifications delivered while the app is closed; the custom chime is played while the app is open.
+Google sign-in requires OAuth provider configuration before it can be used. Google Calendar OAuth, recurring tasks, full offline conflict resolution, and wake-word voice activation are not implemented. Browser speech recognition and notification support vary by browser and operating system. The browser or operating system controls the sound of notifications delivered while the app is closed; the selected custom sound is played while the app is open. Device volume and browser settings still affect loudness.
 
 ### Background push setup
 

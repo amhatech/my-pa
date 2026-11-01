@@ -34,6 +34,20 @@ function getTimeGreeting(date = new Date()) {
   return 'Good evening';
 }
 
+function makeReminderNotification(item) {
+  const startsAt = item?.startsAt ? new Date(item.startsAt) : null;
+  const when = startsAt && !Number.isNaN(startsAt.getTime())
+    ? startsAt.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+    : item?.time || 'your event';
+  const emotion = item?.type === 'Meeting' || item?.type === 'Appointment'
+    ? 'You have an important moment coming up.'
+    : 'Keep the momentum going.';
+  return {
+    title: `Mercy reminder: ${item?.title || 'Your event'}`,
+    body: `${emotion} ${item?.title || 'Your event'} is scheduled for ${when}.`,
+  };
+}
+
 function decodeVapidPublicKey(publicKey) {
   const padding = '='.repeat((4 - publicKey.length % 4) % 4);
   const base64 = `${publicKey}${padding}`.replace(/-/g, '+').replace(/_/g, '/');
@@ -96,6 +110,7 @@ export default function App() {
   const [syncError, setSyncError] = useState('');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [soundEnabled, setSoundEnabled] = useLocalStorageState('my-pa-notification-sound', true);
+  const [notificationSound, setNotificationSound] = useLocalStorageState('my-pa-notification-sound-style', 'alarm');
   const [notificationPermission, setNotificationPermission] = useState(
     'Notification' in window ? Notification.permission : 'unsupported'
   );
@@ -126,23 +141,54 @@ export default function App() {
     ) return;
 
     const startAt = audioContext.currentTime;
-    [0, 1.05].forEach(chimeOffset => {
-      [659.25, 880].forEach((frequency, index) => {
-        const oscillator = audioContext.createOscillator();
-        const volume = audioContext.createGain();
-        const noteStart = startAt + chimeOffset + index * 0.18;
-        oscillator.type = 'sine';
-        oscillator.frequency.value = frequency;
-        volume.gain.setValueAtTime(0.0001, noteStart);
-        volume.gain.exponentialRampToValueAtTime(0.12, noteStart + 0.025);
-        volume.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.58);
-        oscillator.connect(volume);
-        volume.connect(audioContext.destination);
-        oscillator.start(noteStart);
-        oscillator.stop(noteStart + 0.6);
-      });
+    const soundPatterns = {
+      chime: [
+        { frequency: 523.25, offset: 0, duration: 0.48 },
+        { frequency: 659.25, offset: 0.18, duration: 0.5 },
+        { frequency: 783.99, offset: 0.52, duration: 0.62 },
+        { frequency: 659.25, offset: 1.12, duration: 0.72 },
+      ],
+      alarm: [
+        { frequency: 440, offset: 0, duration: 0.42 },
+        { frequency: 587.33, offset: 0.08, duration: 0.5 },
+        { frequency: 440, offset: 0.72, duration: 0.42 },
+        { frequency: 587.33, offset: 0.8, duration: 0.5 },
+        { frequency: 523.25, offset: 1.55, duration: 0.48 },
+        { frequency: 698.46, offset: 1.64, duration: 0.58 },
+        { frequency: 523.25, offset: 2.45, duration: 0.48 },
+        { frequency: 698.46, offset: 2.54, duration: 0.58 },
+        { frequency: 440, offset: 3.35, duration: 0.5 },
+        { frequency: 659.25, offset: 3.44, duration: 0.62 },
+        { frequency: 440, offset: 4.3, duration: 0.5 },
+        { frequency: 659.25, offset: 4.39, duration: 0.72 },
+      ],
+    };
+    const compressor = audioContext.createDynamicsCompressor();
+    compressor.threshold.value = -14;
+    compressor.knee.value = 8;
+    compressor.ratio.value = 8;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.18;
+    compressor.connect(audioContext.destination);
+
+    (soundPatterns[notificationSound] ?? soundPatterns.alarm).forEach(({ frequency, offset, duration }) => {
+      const oscillator = audioContext.createOscillator();
+      const volume = audioContext.createGain();
+      const start = startAt + offset;
+
+      oscillator.type = 'triangle';
+      oscillator.frequency.value = frequency;
+      volume.gain.setValueAtTime(0.0001, start);
+      volume.gain.exponentialRampToValueAtTime(0.55, start + 0.03);
+      volume.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+
+      oscillator.connect(volume);
+      volume.connect(compressor);
+      oscillator.start(start);
+      oscillator.stop(start + duration + 0.05);
     });
-  }, [soundEnabled]);
+    window.setTimeout(() => compressor.disconnect(), 6_000);
+  }, [notificationSound, soundEnabled]);
 
   // Schedule / Time Management State
   const [scheduleItems, setScheduleItems] = useLocalStorageState('my-pa-schedule', [
@@ -313,12 +359,13 @@ export default function App() {
         const reminderKey = `my-pa-notified-${authUser?.id ?? 'local'}-${item.id}-${item.startsAt}`;
         if (reminderAge >= 0 && reminderAge <= 120_000 && !window.localStorage.getItem(reminderKey)) {
           window.localStorage.setItem(reminderKey, 'true');
-          new Notification(`Upcoming: ${item.title}`, {
-            body: `Your event starts at ${item.time}.`,
+          const reminderNotification = makeReminderNotification(item);
+          new Notification(reminderNotification.title, {
+            body: reminderNotification.body,
             icon: '/pwa-icon-192.png',
             tag: `schedule-${item.id}-${new Date(item.startsAt).getTime()}`,
             requireInteraction: true,
-            vibrate: [200, 100, 200, 100, 400],
+            vibrate: [180, 80, 180, 80, 220, 100, 280],
           });
           playNotificationChime();
         }
@@ -328,12 +375,12 @@ export default function App() {
         const lapseKey = `my-pa-lapsed-${authUser?.id ?? 'local'}-${item.id}-${item.startsAt}`;
         if (lapseAge >= 0 && lapseAge <= 120_000 && !window.localStorage.getItem(lapseKey)) {
           window.localStorage.setItem(lapseKey, 'true');
-          new Notification(`Was ${item.title} completed?`, {
-            body: 'This scheduled time has passed. Mark it complete or reschedule it when you can.',
+          new Notification(`Mercy check-in: ${item.title}`, {
+            body: 'This scheduled time has passed. Mark it complete or reschedule it with a quick update.',
             icon: '/pwa-icon-192.png',
             tag: `schedule-lapsed-${item.id}-${new Date(item.startsAt).getTime()}`,
             requireInteraction: true,
-            vibrate: [200, 100, 200, 100, 400],
+            vibrate: [200, 90, 200, 90, 240],
           });
           playNotificationChime();
         }
@@ -395,9 +442,11 @@ export default function App() {
       if (notificationPermission === 'granted') {
         try {
           new Notification("Mercy's Daily Notice", {
-            body: notice.replace(/\s+/g, ' ').slice(0, 180),
+            body: `Good momentum check-in: ${notice.replace(/\s+/g, ' ').slice(0, 180)}`,
             icon: '/pwa-icon-192.png',
             tag: `daily-notice-${dateKey}`,
+            vibrate: [200, 80, 200, 80, 300],
+            requireInteraction: true,
           });
         } catch (error) {
           console.error('Could not show Mercy’s daily notification:', error);
@@ -1588,7 +1637,9 @@ export default function App() {
                         <h4 className="text-xs font-bold text-slate-900 mt-1">{goal.title}</h4>
                         {goal.notes && <p className="mt-1 text-[10px] text-slate-500">{goal.notes}</p>}
                       </div>
-                      <span className="text-[11px] font-semibold text-slate-500">{goal.deadline}</span>
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        {goal.deadline && goal.deadline !== 'Not set' ? goal.deadline : 'No deadline'}
+                      </span>
                     </div>
                     <div className="space-y-1">
                       <div className="flex justify-between text-[10px] text-slate-500">
@@ -1722,7 +1773,7 @@ export default function App() {
                           : 'Enable pop-up notifications'}
                 </button>
                 <label className="flex items-center justify-between gap-3 text-xs text-slate-700">
-                  <span>Play a gentle two-second chime with reminders</span>
+                  <span>Play a sound with reminders</span>
                   <input
                     type="checkbox"
                     checked={soundEnabled}
@@ -1730,14 +1781,27 @@ export default function App() {
                     className="h-4 w-4 accent-sky-600"
                   />
                 </label>
+                <label className="block space-y-1 text-xs text-slate-700">
+                  <span>Reminder sound</span>
+                  <select
+                    value={notificationSound}
+                    onChange={event => setNotificationSound(event.target.value)}
+                    disabled={!soundEnabled}
+                    className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2 text-xs text-slate-800 disabled:opacity-50"
+                  >
+                    <option value="alarm">Loud, longer alarm (about 5 seconds)</option>
+                    <option value="chime">Short, bright chime (about 2 seconds)</option>
+                  </select>
+                </label>
                 <button
                   type="button"
                   onClick={testNotificationSound}
                   disabled={!soundEnabled}
                   className="w-full rounded-xl border border-sky-200 px-3 py-2 text-xs font-semibold text-sky-800 disabled:opacity-50"
                 >
-                  Test chime
+                  Test selected sound
                 </button>
+                <p className="text-[10px] text-slate-500">The selected sound plays while My PA is open. Device volume and browser settings still control how loud it can be.</p>
                 {notificationError && <p role="alert" className="text-xs text-amber-800">{notificationError}</p>}
               </div>
 

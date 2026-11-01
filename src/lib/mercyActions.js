@@ -3,6 +3,28 @@ const memoryCategories = new Set(['Preference', 'Idea', 'Note', 'Personal']);
 const scheduleTypes = new Set(['Meeting', 'Fitness', 'Meal', 'Appointment', 'Task', 'Other']);
 const goalCategories = new Set(['Writing', 'Skills', 'Personal', 'Health', 'Career', 'Learning', 'Finance', 'Relationships', 'General']);
 
+function inferActionType(action, title, details) {
+  const haystack = `${title} ${details}`.toLowerCase();
+  const explicitType = typeof action.type === 'string' ? action.type.toLowerCase() : '';
+  if (['task', 'event', 'memory', 'goal'].includes(explicitType)) return explicitType;
+
+  if (/remember|preference|prefer|like|favorite|personal fact|i am|i feel|note that|keep in mind/i.test(haystack)) {
+    return 'memory';
+  }
+
+  if (/(goal|target|milestone|finish|launch|improve|learn|practice|build|run a|lose|gain|read \d+|write \d+|become|grow)/i.test(haystack) &&
+      !/(call|email|reply|meeting|appointment|lunch|dinner|gym|workout|doctor|interview|brunch|coffee|class|session)/i.test(haystack)) {
+    return 'goal';
+  }
+
+  if (/(tomorrow|today|next week|next month|next monday|next tuesday|next wednesday|next thursday|next friday|next saturday|next sunday|at \d{1,2}:?\d{0,2}\s?(am|pm)|on \w+|this \w+|\d{1,2}\/\d{1,2}|\d{4}-\d{2}-\d{2})/i.test(haystack) ||
+      /(meeting|appointment|lunch|dinner|gym|workout|doctor|interview|coffee|call|pickup|dropoff|brunch|class|session|flight|watch|movie)/i.test(haystack)) {
+    return 'event';
+  }
+
+  return 'task';
+}
+
 export function parseMercyActions(rawActions, now = new Date(), existingTaskIds = new Set(), existingGoalIds = new Set()) {
   if (!Array.isArray(rawActions)) return [];
 
@@ -13,12 +35,13 @@ export function parseMercyActions(rawActions, now = new Date(), existingTaskIds 
     const title = action.title.trim().slice(0, 120);
     if (!title) return [];
     const details = typeof action.details === 'string' ? action.details.trim().slice(0, 500) : '';
+    const normalizedType = inferActionType(action, title, details);
     const startsAtDate = typeof action.startsAt === 'string' ? new Date(action.startsAt) : null;
     const startsAt = startsAtDate && !Number.isNaN(startsAtDate.getTime()) && startsAtDate > now
       ? startsAtDate.toISOString()
       : null;
 
-    if (action.type === 'memory') {
+    if (normalizedType === 'memory') {
       if (!details) return [];
       return [{
         type: 'memory',
@@ -28,7 +51,7 @@ export function parseMercyActions(rawActions, now = new Date(), existingTaskIds 
       }];
     }
 
-    if (action.type === 'goal') {
+    if (normalizedType === 'goal') {
       const existingGoalId = typeof action.existingGoalId === 'string'
         ? action.existingGoalId
         : null;
@@ -47,7 +70,7 @@ export function parseMercyActions(rawActions, now = new Date(), existingTaskIds 
       }];
     }
 
-    if (action.type === 'event' && startsAt) {
+    if (normalizedType === 'event' && startsAt) {
       return [{
         type: 'event',
         title,
@@ -62,7 +85,7 @@ export function parseMercyActions(rawActions, now = new Date(), existingTaskIds 
       }];
     }
 
-    if (action.type === 'task' || action.type === 'event') {
+    if (normalizedType === 'event' || normalizedType === 'task') {
       const existingTaskId = typeof action.existingTaskId === 'string'
         ? action.existingTaskId
         : null;
@@ -171,7 +194,7 @@ export function applyMercyActions(actions, scheduleItems, memories, goals = [], 
         ...(action.details ? { notes: action.details } : {}),
         progress: 0,
         category: action.category,
-        deadline: action.deadline || 'Not set',
+        deadline: action.deadline || 'No deadline',
       };
     }),
     ...goals.filter(goal => !usedGoalIds.has(String(goal.id))),

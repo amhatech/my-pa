@@ -37,3 +37,27 @@ test('applies goals, task priority, events, and memories without a confirmation 
   assert.equal(result.goals[0].category, 'Health');
   assert.equal(result.appliedCount, 4);
 });
+
+test('marks goals without a specified deadline as having no deadline', () => {
+  const result = applyMercyActions([
+    { type: 'goal', title: 'Build a habit', category: 'Personal', deadline: '' },
+  ], [], [], [], Date.parse('2026-10-28T08:00:00Z'));
+
+  assert.equal(result.goals[0].deadline, 'No deadline');
+});
+
+test('infers task, memory, goal, and event categories from plain language', () => {
+  const now = new Date('2026-10-28T08:00:00Z');
+  const actions = parseMercyActions([
+    { title: 'Remember I prefer tea before meetings', details: 'Tea helps me focus.' },
+    { title: 'Run a 5K before the end of the year', details: 'Build a proper training plan.' },
+    { title: 'Email the client with the update', details: 'Need a quick follow-up before 4pm.' },
+    { title: 'Lunch with Ada tomorrow at 1:30 pm', details: 'Keep it light and on time.', startsAt: '2026-10-29T13:30:00Z' },
+  ], now);
+
+  assert.equal(actions[0].type, 'memory');
+  assert.equal(actions[1].type, 'goal');
+  assert.equal(actions[2].type, 'task');
+  assert.equal(actions[3].type, 'event');
+  assert.equal(actions[3].category, 'Other');
+});
