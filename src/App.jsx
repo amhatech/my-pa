@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from './lib/supabase.js';
 import { VAPID_PUBLIC_KEY } from './lib/push.js';
+import { getDailyEncouragement } from './lib/dailyEncouragement.js';
 import { applyMercyActions, parseMercyActions } from './lib/mercyActions.js';
 import { getTodayScheduleItems } from './lib/schedule.js';
 
@@ -419,16 +420,18 @@ export default function App() {
       if (window.localStorage.getItem(storageKey) || dailyNoticeProcessingRef.current.has(storageKey)) return;
       dailyNoticeProcessingRef.current.add(storageKey);
 
+      const encouragement = getDailyEncouragement(dateKey);
       const todaysEvents = scheduleItems.filter(item =>
         !item.completed && item.startsAt && new Date(item.startsAt).toDateString() === now.toDateString()
       );
       const upcomingGoals = goals.slice(0, 3).map(goal => goal.title);
       const fallbackNotice = [
-        `${getTimeGreeting(now)}! Here is your Daily Notice for ${now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}.`,
+        `${getTimeGreeting(now)}! ${encouragement}`,
         todaysEvents.length
           ? `Today's schedule: ${todaysEvents.map(item => `${item.title} at ${item.time}`).join(', ')}.`
           : 'You have no events saved for today yet.',
         upcomingGoals.length ? `Keep one goal moving forward: ${upcomingGoals[0]}.` : 'Choose one important thing to make progress on today.',
+        'Start with one focused 10-minute step.',
       ].join('\n\n');
 
       let notice = fallbackNotice;
@@ -436,7 +439,7 @@ export default function App() {
         if (supabase) {
           const { data, error } = await supabase.functions.invoke('mercy-chat', {
             body: {
-              message: `Write my concise, encouraging Daily Notice for the current local time ${now.toLocaleTimeString()} on ${now.toLocaleDateString()}. Use only the supplied saved records. Mention today's scheduled events and one practical priority. If there are no events or goals, suggest adding one. Do not invent personal details.`,
+              message: `Write a concise, practical Daily Notice for ${dateKey} at ${now.toLocaleTimeString()}. Begin with this exact encouragement: "${encouragement}". Then guide me through today using only the supplied saved records: mention today's scheduled events and one practical priority. End with one small action I can start in 10 minutes. If there are no events or goals, encourage me to choose one priority. Do not invent personal details or reuse a generic greeting instead of the encouragement.`,
               history: [],
               context: { scheduleItems, goals, memories },
             },

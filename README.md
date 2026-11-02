@@ -32,7 +32,7 @@ The app requires the Supabase schema and Edge Function to be deployed before clo
 - A louder, selectable short chime or five-second alarm plays for foreground reminders after the user enables sound; schedule alerts request persistent notifications and vibration where supported.
 - Schedule notifications can report an event as overdue after 30 minutes if it remains incomplete.
 - Event date/time, configurable reminder lead time, and browser notifications while the app is open and notification permission is granted.
-- Background schedule reminders and Mercy's 10:00 AM local Daily Notice use Web Push when VAPID, database, and scheduled Edge Function delivery are configured.
+- Background schedule reminders and a different, practical encouragement each day in Mercy's 10:00 AM local Daily Notice use Web Push when VAPID, database, and scheduled Edge Function delivery are configured.
 - JSON data export, cloud-record deletion, account deletion (requires its Edge Function and service-role secret), and sign-out controls.
 - A production PWA manifest, cached app shell, and service worker registration.
 
@@ -46,7 +46,7 @@ Background push is opt-in. The user must sign in, open Settings → Reminders, a
 3. Deploy `send-push-notifications` and run the push migration above. Configure Supabase Cron to POST to `https://PROJECT_REF.supabase.co/functions/v1/send-push-notifications` every minute with the header `x-cron-secret` set to the same `PUSH_CRON_SECRET`.
 4. Enable and test notifications from a supported browser or installed PWA. iOS requires the app to be installed to the Home Screen for Web Push.
 
-Until the database migration and Cron job are configured, only foreground browser reminders work. Pop-up permission and sound must be enabled by the user in Settings; the app cannot switch on device permissions itself. Background notification audio is chosen by the operating system and can be silenced by device settings, Focus modes, or Do Not Disturb; a website cannot guarantee an alarm will wake someone.
+Until the database migration and Cron job are configured, only foreground browser reminders work. Pop-up permission and sound must be enabled by the user in Settings; the app cannot switch on device permissions itself. Background notification audio uses the operating system's notification sound and can be silenced by device settings, Focus modes, or Do Not Disturb. A website cannot play its selected custom alarm while closed or guarantee an alarm will wake someone.
 
 ## Security and data
 

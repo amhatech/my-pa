@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import webpush from 'npm:web-push@3.6.7';
+import { getDailyEncouragement } from '../../../src/lib/dailyEncouragement.js';
 
 type ScheduleItem = {
   id?: string | number;
@@ -41,7 +42,8 @@ function makeDailyNotice(data: Record<string, unknown>, now: Date, timeZone: str
     ? `One goal to keep moving: ${firstGoal.title}.`
     : 'Choose one small priority to make progress on today.';
 
-  return `Good morning! ${scheduleSummary} ${prioritySummary}`;
+  const encouragement = getDailyEncouragement(localDateKey(now, timeZone));
+  return `Good morning! ${encouragement} ${scheduleSummary} ${prioritySummary} Start with one focused 10-minute step.`;
 }
 
 Deno.serve(async request => {
@@ -169,7 +171,7 @@ Deno.serve(async request => {
       continue;
     }
 
-    if (timeParts.hour === '10' && Number(timeParts.minute) <= 1) {
+    if (timeParts.hour === '10' && Number(timeParts.minute) <= 4) {
       await sendOnce(`daily-notice:${localDateKey(now, subscriptionRow.time_zone || 'UTC')}`, {
         title: "Mercy's Daily Notice",
         body: makeDailyNotice(data, now, subscriptionRow.time_zone || 'UTC'),

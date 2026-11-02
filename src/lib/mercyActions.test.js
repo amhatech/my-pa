@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { getDailyEncouragement } from './dailyEncouragement.js';
 import { applyMercyActions, parseMercyActions } from './mercyActions.js';
+
+test('daily encouragement changes on consecutive mornings and repeats by calendar date', () => {
+  const firstDay = getDailyEncouragement('2026-11-02');
+  const nextDay = getDailyEncouragement('2026-11-03');
+
+  assert.notEqual(firstDay, nextDay);
+  assert.equal(firstDay, getDailyEncouragement('2026-11-02'));
+});
 
 test('parses actionable memories, goals, tasks, and future schedule items safely', () => {
   const now = new Date('2026-10-28T08:00:00Z');
