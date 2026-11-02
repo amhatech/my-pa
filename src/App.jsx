@@ -133,61 +133,69 @@ export default function App() {
 
   const playNotificationChime = useCallback(() => {
     const audioContext = audioContextRef.current;
-    if (
-      !soundEnabled ||
-      document.visibilityState !== 'visible' ||
-      !audioContext ||
-      audioContext.state !== 'running'
-    ) return;
+    if (!soundEnabled || !audioContext) return;
 
-    const startAt = audioContext.currentTime;
-    const soundPatterns = {
-      chime: [
-        { frequency: 523.25, offset: 0, duration: 0.48 },
-        { frequency: 659.25, offset: 0.18, duration: 0.5 },
-        { frequency: 783.99, offset: 0.52, duration: 0.62 },
-        { frequency: 659.25, offset: 1.12, duration: 0.72 },
-      ],
-      alarm: [
-        { frequency: 440, offset: 0, duration: 0.42 },
-        { frequency: 587.33, offset: 0.08, duration: 0.5 },
-        { frequency: 440, offset: 0.72, duration: 0.42 },
-        { frequency: 587.33, offset: 0.8, duration: 0.5 },
-        { frequency: 523.25, offset: 1.55, duration: 0.48 },
-        { frequency: 698.46, offset: 1.64, duration: 0.58 },
-        { frequency: 523.25, offset: 2.45, duration: 0.48 },
-        { frequency: 698.46, offset: 2.54, duration: 0.58 },
-        { frequency: 440, offset: 3.35, duration: 0.5 },
-        { frequency: 659.25, offset: 3.44, duration: 0.62 },
-        { frequency: 440, offset: 4.3, duration: 0.5 },
-        { frequency: 659.25, offset: 4.39, duration: 0.72 },
-      ],
+    const play = () => {
+      if (document.visibilityState !== 'visible' || audioContext.state !== 'running') return;
+
+      const startAt = audioContext.currentTime;
+      const soundPatterns = {
+        chime: [
+          { frequency: 523.25, offset: 0, duration: 0.48 },
+          { frequency: 659.25, offset: 0.18, duration: 0.5 },
+          { frequency: 783.99, offset: 0.52, duration: 0.62 },
+          { frequency: 659.25, offset: 1.12, duration: 0.72 },
+        ],
+        alarm: [
+          { frequency: 440, offset: 0, duration: 0.42 },
+          { frequency: 587.33, offset: 0.08, duration: 0.5 },
+          { frequency: 440, offset: 0.72, duration: 0.42 },
+          { frequency: 587.33, offset: 0.8, duration: 0.5 },
+          { frequency: 523.25, offset: 1.55, duration: 0.48 },
+          { frequency: 698.46, offset: 1.64, duration: 0.58 },
+          { frequency: 523.25, offset: 2.45, duration: 0.48 },
+          { frequency: 698.46, offset: 2.54, duration: 0.58 },
+          { frequency: 440, offset: 3.35, duration: 0.5 },
+          { frequency: 659.25, offset: 3.44, duration: 0.62 },
+          { frequency: 440, offset: 4.3, duration: 0.5 },
+          { frequency: 659.25, offset: 4.39, duration: 0.72 },
+        ],
+      };
+      const compressor = audioContext.createDynamicsCompressor();
+      compressor.threshold.value = -14;
+      compressor.knee.value = 8;
+      compressor.ratio.value = 8;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.18;
+      compressor.connect(audioContext.destination);
+
+      (soundPatterns[notificationSound] ?? soundPatterns.alarm).forEach(({ frequency, offset, duration }) => {
+        const oscillator = audioContext.createOscillator();
+        const volume = audioContext.createGain();
+        const start = startAt + offset;
+
+        oscillator.type = 'triangle';
+        oscillator.frequency.value = frequency;
+        volume.gain.setValueAtTime(0.0001, start);
+        volume.gain.exponentialRampToValueAtTime(0.55, start + 0.03);
+        volume.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+
+        oscillator.connect(volume);
+        volume.connect(compressor);
+        oscillator.start(start);
+        oscillator.stop(start + duration + 0.05);
+      });
+      window.setTimeout(() => compressor.disconnect(), 6_000);
     };
-    const compressor = audioContext.createDynamicsCompressor();
-    compressor.threshold.value = -14;
-    compressor.knee.value = 8;
-    compressor.ratio.value = 8;
-    compressor.attack.value = 0.003;
-    compressor.release.value = 0.18;
-    compressor.connect(audioContext.destination);
 
-    (soundPatterns[notificationSound] ?? soundPatterns.alarm).forEach(({ frequency, offset, duration }) => {
-      const oscillator = audioContext.createOscillator();
-      const volume = audioContext.createGain();
-      const start = startAt + offset;
+    if (audioContext.state === 'suspended') {
+      audioContext.resume().then(play).catch(error => {
+        console.error('Could not resume notification sound:', error);
+      });
+      return;
+    }
 
-      oscillator.type = 'triangle';
-      oscillator.frequency.value = frequency;
-      volume.gain.setValueAtTime(0.0001, start);
-      volume.gain.exponentialRampToValueAtTime(0.55, start + 0.03);
-      volume.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-
-      oscillator.connect(volume);
-      volume.connect(compressor);
-      oscillator.start(start);
-      oscillator.stop(start + duration + 0.05);
-    });
-    window.setTimeout(() => compressor.disconnect(), 6_000);
+    play();
   }, [notificationSound, soundEnabled]);
 
   // Schedule / Time Management State
@@ -347,6 +355,15 @@ export default function App() {
       window.removeEventListener('offline', updateOnlineStatus);
     };
   }, []);
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return undefined;
+    const handlePushMessage = event => {
+      if (event.data?.type === 'MY_PA_PUSH_NOTIFICATION') playNotificationChime();
+    };
+    navigator.serviceWorker.addEventListener('message', handlePushMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', handlePushMessage);
+  }, [playNotificationChime]);
 
   useEffect(() => {
     if (notificationPermission !== 'granted') return undefined;

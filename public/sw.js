@@ -1,4 +1,4 @@
-const CACHE_NAME = 'my-pa-shell-v3';
+const CACHE_NAME = 'my-pa-shell-v4';
 const APP_SHELL = [
   '/',
   '/manifest.webmanifest',
@@ -59,10 +59,17 @@ self.addEventListener('push', event => {
     tag: typeof payload.tag === 'string' ? payload.tag : undefined,
     data: { url: typeof payload.url === 'string' ? payload.url : '/' },
     vibrate: [200, 100, 200, 100, 400],
+    silent: false,
     requireInteraction: true,
   };
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    self.registration.showNotification(title, options).then(() => (
+      self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
+        clients.forEach(client => client.postMessage({ type: 'MY_PA_PUSH_NOTIFICATION' }));
+      })
+    ))
+  );
 });
 
 self.addEventListener('notificationclick', event => {

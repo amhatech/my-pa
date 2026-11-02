@@ -36,7 +36,7 @@ The app requires the Supabase schema and Edge Function to be deployed before clo
 - JSON data export, cloud-record deletion, account deletion (requires its Edge Function and service-role secret), and sign-out controls.
 - A production PWA manifest, cached app shell, and service worker registration.
 
-Google sign-in requires OAuth provider configuration before it can be used. Google Calendar OAuth, recurring tasks, full offline conflict resolution, and wake-word voice activation are not implemented. Browser speech recognition and notification support vary by browser and operating system. The browser or operating system controls the sound of notifications delivered while the app is closed; the selected custom sound is played while the app is open. Device volume and browser settings still affect loudness.
+Google sign-in requires OAuth provider configuration before it can be used. Google Calendar OAuth, recurring tasks, full offline conflict resolution, and wake-word voice activation are not implemented. Browser speech recognition and notification support vary by browser and operating system. The browser or operating system controls the sound of notifications delivered while the app is closed; the selected custom sound is played for push notifications while the app is open. Device volume and browser notification settings still affect loudness, and web apps cannot override silent mode or guarantee an alarm while closed.
 
 ### Background push setup
 
