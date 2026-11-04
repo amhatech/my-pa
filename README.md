@@ -26,7 +26,7 @@ The app requires the Supabase schema and Edge Function to be deployed before clo
 - Browser-local cache with debounced cloud saving and offline indicators.
 - New accounts automatically start with an empty cloud workspace.
 - AI requests routed through an authenticated Supabase Edge Function; Gemini credentials stay server-side.
-- Browser speech-to-text and spoken playback for AI replies where the browser supports them.
+- Browser speech-to-text and spoken playback for AI replies, with a saved voice preference and preview for installed device voices where supported.
 - Mercy can automatically save clear user requests as tasks, schedule events, or memories; task priority is saved with each task.
 - A three-second hold on Mercy's floating button starts voice typing and sends the recognized request automatically where browser speech recognition is supported.
 - A louder, selectable short chime or five-second alarm plays for foreground reminders after the user enables sound; schedule alerts request persistent notifications and vibration where supported.

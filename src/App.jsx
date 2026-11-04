@@ -119,6 +119,8 @@ export default function App() {
   const [pushSubscriptionEnabled, setPushSubscriptionEnabled] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState('');
+  const [availableVoices, setAvailableVoices] = useState([]);
+  const [spokenVoiceURI, setSpokenVoiceURI] = useLocalStorageState('my-pa-spoken-voice', '');
   
   // Chat state
   const [messages, setMessages] = useLocalStorageState('my-pa-messages', [
@@ -355,6 +357,14 @@ export default function App() {
       window.removeEventListener('online', updateOnlineStatus);
       window.removeEventListener('offline', updateOnlineStatus);
     };
+  }, []);
+
+  useEffect(() => {
+    if (!('speechSynthesis' in window)) return undefined;
+    const updateVoices = () => setAvailableVoices(window.speechSynthesis.getVoices());
+    updateVoices();
+    window.speechSynthesis.addEventListener('voiceschanged', updateVoices);
+    return () => window.speechSynthesis.removeEventListener('voiceschanged', updateVoices);
   }, []);
 
   useEffect(() => {
@@ -791,15 +801,18 @@ export default function App() {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
-    const language = navigator.language.toLowerCase();
-    const feminineVoice = voices.find(voice =>
-      voice.lang.toLowerCase().startsWith(language.split('-')[0]) &&
-      /female|woman|samantha|victoria|karen|moira|tessa|serena|ava|aria|jenny|zira|susan/i.test(voice.name)
-    ) || voices.find(voice =>
-      /female|woman|samantha|victoria|karen|moira|tessa|serena|ava|aria|jenny|zira|susan/i.test(voice.name)
-    );
-    if (feminineVoice) utterance.voice = feminineVoice;
-    else utterance.lang = navigator.language;
+    const selectedVoice = voices.find(voice => voice.voiceURI === spokenVoiceURI);
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+      utterance.lang = selectedVoice.lang;
+    } else {
+      utterance.lang = navigator.language;
+    }
+    utterance.onerror = event => {
+      console.error('Could not speak Mercy’s reply:', event.error);
+      setVoiceError('Could not play this voice. Choose another available voice and try again.');
+    };
+    utterance.onend = () => setVoiceError('');
     window.speechSynthesis.speak(utterance);
   };
 
@@ -1775,6 +1788,47 @@ export default function App() {
                   <span className="text-xs font-medium text-slate-800">Email</span>
                   <span className="text-xs font-bold text-sky-600">{authUser.email}</span>
                 </div>
+              </div>
+
+              <div className="bg-white p-4 rounded-2xl border border-sky-100 shadow-sm space-y-3">
+                <h3 className="text-sm font-bold text-slate-900">Mercy’s voice</h3>
+                <p className="text-xs text-slate-600">Choose a voice installed on this device. Your choice is saved in this browser.</p>
+                {'speechSynthesis' in window ? (
+                  <>
+                    <label className="block space-y-1 text-xs text-slate-700">
+                      <span>Spoken reply voice</span>
+                      <select
+                        value={spokenVoiceURI}
+                        onChange={event => {
+                          setSpokenVoiceURI(event.target.value);
+                          setVoiceError('');
+                        }}
+                        className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2 text-xs text-slate-800"
+                      >
+                        <option value="">Device default</option>
+                        {availableVoices.map(voice => (
+                          <option key={voice.voiceURI} value={voice.voiceURI}>
+                            {voice.name} ({voice.lang}){voice.default ? ' — default' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => speakMessage("Hello, I’m Mercy. This is how my voice will sound on this device.")}
+                      disabled={availableVoices.length === 0}
+                      className="w-full rounded-xl border border-sky-200 px-3 py-2 text-xs font-semibold text-sky-800 disabled:opacity-50"
+                    >
+                      Preview voice
+                    </button>
+                    {availableVoices.length === 0 && (
+                      <p className="text-[10px] text-slate-500">No speech voices are available in this browser right now.</p>
+                    )}
+                    {voiceError && <p role="status" className="text-[11px] text-amber-800">{voiceError}</p>}
+                  </>
+                ) : (
+                  <p className="text-xs text-amber-800">Spoken replies are not supported by this browser.</p>
+                )}
               </div>
 
               <div className="bg-white p-4 rounded-2xl border border-sky-100 shadow-sm space-y-3">
